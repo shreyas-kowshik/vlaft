@@ -10,7 +10,6 @@ conda activate libero2
 pip install uv
 uv pip install -r requirements.txt
 uv pip install transformers==4.40.2
-uv pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
 uv pip install -e .
 uv pip install numpy==1.24.1
 
@@ -45,4 +44,10 @@ Blueprint
 
 ```
 class RobotDataset
+```
+
+## Training
+
+```
+python train.py --phase pretrain --root_dir /data/user_data/skowshik/datasets/libero_pro/
 ```
