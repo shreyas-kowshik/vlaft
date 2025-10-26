@@ -1,6 +1,6 @@
 ###############################
 #
-#  Minimal JAX Tutorial: MNIST Classifier with TrainState
+#  Minimal JAX Tutorial: CIFAR-10 Classifier with TrainState
 #
 ###############################
 
@@ -78,14 +78,13 @@ class TrainState(flax.struct.PyTreeNode):
             grads = jax.grad(loss_fn, has_aux=has_aux)(self.params)
             return self.apply_gradients(grads=grads)
 
-# MNIST CNN model
-class MNISTCNN(nn.Module):
+# CIFAR-10 CNN model
+class CIFARCNN(nn.Module):
     num_classes: int = 10
     
     @nn.compact
     def __call__(self, x, train: bool = True):
-        # Reshape input from (batch, 28, 28) to (batch, 28, 28, 1)
-        # x = x[..., None]  # Add channel dimension
+        # Input is already (batch, 32, 32, 3) for CIFAR-10
         # First conv block
         x = nn.Conv(features=32, kernel_size=(3, 3), padding='SAME')(x)
         x = nn.BatchNorm(use_running_average=not train)(x)
@@ -108,7 +107,7 @@ class MNISTCNN(nn.Module):
         # Dense layers
         x = nn.Dense(features=256)(x)
         x = nn.relu(x)
-        x = nn.Dropout(rate=0.0, deterministic=not train)(x)
+        x = nn.Dropout(rate=0.2, deterministic=not train)(x)
         x = nn.Dense(features=self.num_classes)(x)
         
         return x
@@ -130,7 +129,6 @@ def train_step(state, batch_images, batch_labels):
             mutable=['batch_stats'],
             rngs={'dropout': dropout_rng} if dropout_rng is not None else None
         )
-        # breakpoint()
         loss = optax.softmax_cross_entropy(logits, batch_labels).mean()
         accuracy = (jnp.argmax(logits, axis=-1) == jnp.argmax(batch_labels, axis=-1)).mean()
         # return updated batch_stats via aux
@@ -140,6 +138,7 @@ def train_step(state, batch_images, batch_labels):
     new_state, info = state.apply_loss_fn(loss_fn=loss_fn, has_aux=True)
     new_state = new_state.replace(batch_stats=info['batch_stats'])
     return new_state, {'accuracy': info['accuracy']}
+
 # Evaluation function
 def eval_step(state, batch_images, batch_labels):
     """Evaluation step."""
@@ -148,8 +147,8 @@ def eval_step(state, batch_images, batch_labels):
     accuracy = (jnp.argmax(logits, axis=-1) == jnp.argmax(batch_labels, axis=-1)).mean()
     return {'loss': loss, 'accuracy': accuracy}
 
-def load_mnist_data(batch_size=128):
-    """Load MNIST dataset using TensorFlow Datasets."""
+def load_cifar_data(batch_size=128):
+    """Load CIFAR-10 dataset using TensorFlow Datasets."""
     
     def preprocess_fn(data):
         image = tf.cast(data['image'], tf.float32) / 255.0  # Normalize to [0, 1]
@@ -157,14 +156,14 @@ def load_mnist_data(batch_size=128):
         return image, label
     
     # Load training data
-    train_ds = tfds.load('mnist', split='train', as_supervised=False)
+    train_ds = tfds.load('cifar10', split='train', as_supervised=False)
     train_ds = train_ds.map(preprocess_fn, num_parallel_calls=tf.data.AUTOTUNE)
     train_ds = train_ds.batch(batch_size)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     train_ds = tfds.as_numpy(train_ds)
     
     # Load test data
-    test_ds = tfds.load('mnist', split='test', as_supervised=False)
+    test_ds = tfds.load('cifar10', split='test', as_supervised=False)
     test_ds = test_ds.map(preprocess_fn, num_parallel_calls=tf.data.AUTOTUNE)
     test_ds = test_ds.batch(batch_size)
     test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
@@ -227,8 +226,8 @@ def evaluate(state, test_ds, num_batches=None):
     return avg_loss, avg_accuracy
 
 def main():
-    """Main training loop for MNIST classification."""
-    print("JAX Tutorial: MNIST Classifier with TrainState")
+    """Main training loop for CIFAR-10 classification."""
+    print("JAX Tutorial: CIFAR-10 Classifier with TrainState")
     print("=" * 50)
     
     # Set random seed
@@ -237,12 +236,12 @@ def main():
     
     # Training parameters
     batch_size = 128
-    num_epochs = 5
+    num_epochs = 10  # Changed from 5 to 10 as requested
     learning_rate = 0.001
     num_classes = 10
     
-    print(f"Loading MNIST dataset...")
-    train_ds, test_ds = load_mnist_data(batch_size=batch_size)
+    print(f"Loading CIFAR-10 dataset...")
+    train_ds, test_ds = load_cifar_data(batch_size=batch_size)
     
     # Get a sample batch to initialize the model
     sample_images, sample_labels = next(iter(train_ds))
@@ -251,8 +250,7 @@ def main():
     print(f"  Labels: {sample_labels.shape}")
     
     # Create model
-    model = MNISTCNN(num_classes=num_classes)
-    breakpoint()
+    model = CIFARCNN(num_classes=num_classes)
     
     # Initialize parameters - extract both params and batch_stats
     rng, init_rng = jax.random.split(rng, 2)
@@ -276,7 +274,7 @@ def main():
         print(f"Epoch {epoch + 1}/{num_epochs}")
         
         # Train for one epoch
-        state, train_loss, train_acc = train_epoch(state, train_ds, num_batches_per_epoch=100)  # Limit batches for faster training
+        state, train_loss, train_acc = train_epoch(state, train_ds, num_batches_per_epoch=None)  # Limit batches for faster training
         
         # Evaluate on test set
         test_loss, test_acc = evaluate(state, test_ds, num_batches=50)  # Limit batches for faster evaluation

@@ -46,8 +46,7 @@ def main():
     # Initialize model and optimizer
     model = Net()
     rngs = {'params': key, 'dropout': key}
-    params = model.init(
-        rngs, train_images[0:1])
+    params = model.init(rngs)
     tx = optax.adam(0.001)
     opt_state = tx.init(params)
 
