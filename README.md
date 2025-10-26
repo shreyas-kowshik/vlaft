@@ -4,6 +4,24 @@
 
 Install LIBERO and activate `libero` environment
 
+```
+conda create -n libero2 python=3.10
+conda activate libero2
+pip install uv
+uv pip install -r requirements.txt
+uv pip install transformers==4.40.2
+uv pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
+uv pip install -e .
+uv pip install numpy==1.24.1
+
+python -m pip install -U "jax[cuda12]==0.6.2" # Torch breaks a bit as numpy goes to 2.0.0, jax needs it apparently
+```
+
+From current repository
+```
+pip install -r requirements.txt
+```
+
 ## Checkpoints
 
 ViT: `https://drive.google.com/file/d/1bSsvRI4mDM3Gg51C6xO0l9CbojYw3OEt/view`
