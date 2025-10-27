@@ -17,6 +17,25 @@ import clip
 from transformers import AutoProcessor, FlaxCLIPModel
 from gpt2_jax import GPT, GPTConfig
 
+def generate_attention_mask(K, num_A, num_B):
+    # num_A: 1+1+self.NUM_RESAMPLER_QUERY*2+1*2
+    # num_A: text, state, image_embedding, image_cls_token_embedding
+    # num_B: self.NUM_OBS_TOKEN+self.action_pred_steps
+    # num_B: obs_tokens(if exists), action_pred_token, state_pred_token (if exists)
+    sequence_length = (num_A + num_B) * K
+    attention_mask = np.ones((sequence_length, sequence_length))
+    for i in range(K):
+        start_index = i * (num_A + num_B)
+        end_index = start_index + num_A + num_B
+        
+        # the i-th sub-sequence can not attend to the sub-sequences that after the i-th
+        attention_mask[start_index:end_index, end_index:] = 0
+        
+        # the sub-sub-sequence B can not be attended to
+        attention_mask[:, start_index+num_A:end_index] = 0
+            
+    return attention_mask
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
@@ -68,36 +87,45 @@ class BCSimple(nn.Module):
     num_images: int = 2
     action_dim: int = 7
     state_dim: int = 7
-    config = None
+    config: GPTConfig = None
 
     def setup(self):
-        self.image_encoder = fm.ResNet18(output='logits', pretrained='imagenet')
-        self.image_projector = nn.Dense(1000, self.hidden_dim)
-        self.state_encoder = nn.Dense(self.state_dim, self.hidden_dim)
+        self.image_encoder = fm.ResNet18(output='activations', pretrained='imagenet', normalize=True)
+        self.image_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
+        self.state_encoder = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
         self.clip = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.text_projector = nn.Dense(512, self.hidden_dim)
+        self.text_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
         self.timestep_embedding = TimestepEmbedder(self.hidden_dim)
         self.action_embedding = self.param(
             "embedding",
             normal(stddev=0.02),      # init_fn(key, shape, dtype) -> array
             (3, self.hidden_dim)
         )
-        self.action_projector = nn.Dense(self.action_dim, self.hidden_dim)
+        self.action_projector_arm = nn.Sequential([
+            nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02)),
+            nn.relu,
+            nn.Dense(self.action_dim - 1, kernel_init=nn.initializers.normal(0.02)),
+            nn.tanh,
+        ])
+        self.action_projector_gripper = nn.Sequential([
+            nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02)), 
+            nn.relu,
+            nn.Dense(1, kernel_init=nn.initializers.normal(0.02)), 
+            nn.sigmoid
+        ])
         self.transformer = GPT(self.config)
         
     @nn.compact
-    def __call__(self, images, states, actions, text_tokens, train=False):
+    def __call__(self, images, states, actions, text_tokens, attention_mask,train=False):
         # (x = (B, H, W, C) image, t = (B,) timesteps, y = (B,) class labels)
         # images = (B, num_images, T, H, W, C)
         # states = (B, T, state_dim)
         # actions = (B, T, action_dim)
         B, num_images, T, H, W, C = images.shape
         images = images.reshape(-1, H, W, C)
-        image_emb = self.image_encoder(images)
+        image_emb = self.image_encoder(images)['block4_1']
         image_emb = image_emb.reshape(B, T, num_images, -1)
-        breakpoint()
         image_emb = self.image_projector(image_emb) # (B, T, num_images, hidden_dim)
-        breakpoint()
 
         state_emb = self.state_encoder(states) # (B, T, hidden_dim)
 
@@ -109,26 +137,48 @@ class BCSimple(nn.Module):
         # Add global timestep embedding to images, state, text
         timestep_embedding = self.timestep_embedding(jnp.arange(T)) # (T, hidden_dim)
         timestep_embedding = timestep_embedding.reshape(1, T, -1)
-        image_emb = image_emb + timestep_embedding
+        image_emb = image_emb + jnp.expand_dims(timestep_embedding, axis=2)
         state_emb = state_emb + timestep_embedding
         text_emb = text_emb + timestep_embedding
 
-        action_emb = action_emb.reshape(1, 1, 3, -1)
+        action_emb = self.action_embedding.reshape(1, 1, 3, -1)
         action_emb = action_emb + timestep_embedding.reshape(1, T, 1, -1)
 
         # Concatenate all embeddings and pass through transformer
-        transformer_input = jnp.concatenate([jnp.expand_dims(image_emb, axis=2), 
+        transformer_input = jnp.concatenate([image_emb, 
                             jnp.expand_dims(state_emb, axis=2), 
                             jnp.expand_dims(text_emb, axis=2),
-                            action_emb], axis=2) # (B, T, num_images + 1 + 1 + 3, hidden_dim)
+                            jnp.repeat(action_emb, B, axis=0)], axis=2) # (B, T, num_images + 1 + 1 + 3, hidden_dim)
         
-        transformer_output = self.transformer(transformer_input, deterministic=not train)
-        action_pred = self.action_projector(transformer_output)
-        return action_pred
+        # Generate attention mask
+        # attention_mask = generate_attention_mask(self.sequence_length, self.num_images + 1 + 1, self.action_pred_steps)
+        # breakpoint()
+        transformer_input = transformer_input.reshape(B, -1, self.hidden_dim) # (B, T * (num_images + 1 + 1 + 3), hidden_dim)
+        attention_mask = jnp.expand_dims(attention_mask, axis=0)
+        transformer_output = self.transformer(transformer_input, attention_mask, deterministic=not train)
+        # breakpoint()
+        transformer_output = transformer_output.reshape(B, T, -1, self.hidden_dim)
+        action_pred_tokens = transformer_output[:, :, -self.action_pred_steps:, :]
+        action_pred_arm = self.action_projector_arm(action_pred_tokens)
+        action_pred_gripper = self.action_projector_gripper(action_pred_tokens)
+        # breakpoint()
+        return action_pred_arm, action_pred_gripper
 
 if __name__ == "__main__":
     config = GPTConfig()
-    model = BCSimple(config)
+    model = BCSimple(
+        10, # sequence_length : int = 10
+        224, # input_image_size : int = 224
+        3, # action_pred_steps : int = 3
+        12, # transformer_layers: int = 12
+        768, # hidden_dim: int = 768
+        12, # transformer_heads: int = 12
+        False, # gripper_width: bool = False
+        2, # num_images: int = 2
+        7, # action_dim: int = 7
+        7, # state_dim: int = 7
+        config
+    )
 
     rng = jax.random.PRNGKey(0)
 
@@ -137,13 +187,23 @@ if __name__ == "__main__":
     example_states = jax.random.normal(rng, (2, 10, 7))
     example_actions = jax.random.normal(rng, (2, 10, 7))
     example_text_tokens = jnp.ones((2, 10, 77))
-    params = model.init({'params': params_rng, 'dropout': dropout_rng}, 
+
+    attention_mask = generate_attention_mask(model.sequence_length, model.num_images + 1 + 1, model.action_pred_steps)
+    attention_mask = jnp.array(attention_mask)
+    variables = model.init({'params': params_rng, 'dropout': dropout_rng}, 
                         example_images, example_states, example_actions, example_text_tokens,
+                        attention_mask,
                         train=False
                         )
+    params = variables['params']
+    batch_stats = variables['batch_stats']
+
     rng, apply_dropout_rng = jax.random.split(rng)
-    output = model.apply(params,
+    (action_pred_arm, action_pred_gripper), mutable = model.apply(variables,
                         example_images, example_states, example_actions, example_text_tokens,
-                        train=True, rngs={'dropout': apply_dropout_rng})
-    print(output.shape)
+                        attention_mask,
+                        train=True, 
+                        mutable=['batch_stats'],
+                        rngs={'dropout': apply_dropout_rng})
+    # print(output.shape)
     breakpoint()
