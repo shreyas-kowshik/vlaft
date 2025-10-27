@@ -97,7 +97,7 @@ class BCSimple(nn.Module):
         self.text_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
         self.timestep_embedding = TimestepEmbedder(self.hidden_dim)
         self.action_embedding = self.param(
-            "actino_embedding",
+            "action_embedding",
             normal(stddev=0.02),      # init_fn(key, shape, dtype) -> array
             (3, self.hidden_dim)
         )
@@ -133,7 +133,9 @@ class BCSimple(nn.Module):
         text_tokens = text_tokens.reshape(B, -1)
         text_emb = self.clip.get_text_features(text_tokens, params=self.clip.params, train=False) # (B * T, hidden_dim)
         # text_emb = text_emb.reshape(B, -1)
+        # breakpoint()
         text_emb = self.text_projector(text_emb) # (B, T, hidden_dim)
+        # breakpoint()
         text_emb = jnp.repeat(jnp.expand_dims(text_emb, axis=1), T, axis=1) # (B, T, hidden_dim)
 
         # Add global timestep embedding to images, state, text

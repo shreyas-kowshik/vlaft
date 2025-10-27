@@ -1,4 +1,4 @@
-# Minimal training script
+# Minimal training script (JIT-only)
 
 import logging
 
@@ -37,7 +37,7 @@ from utils.wandb import setup_wandb, default_wandb_config
 try:
     from petrel_client.client import Client
 except:
-    pass 
+    pass
 from omegaconf import DictConfig
 import torch
 from torch.utils.data import Dataset
@@ -59,6 +59,12 @@ import flax
 import optax
 import jax
 import jax.numpy as jnp
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+    _tz = ZoneInfo("America/New_York")
+except Exception:
+    _tz = None
 from flax.training import checkpoints
 
 from utils.argument_utils import get_parser
@@ -74,8 +80,7 @@ wandb_config.update({
     'name': 'vlaft_libero_pretrain',
 })
 
-def extract_batch(batch): # List
-    # Common key guesses; tweak as needed.
+def extract_batch(batch):  # List
     rgb_static = batch[0]
     text_tokens = batch[1]
     actions = batch[2]
@@ -85,22 +90,25 @@ def extract_batch(batch): # List
 
 def save_state(ckpt_dir: str,
                state,
-               step: Optional[int] = None,
+               step: int,
                *,
-               is_replicated: bool = False,
-               keep: int = 3,
-               overwrite: bool = True):
+               prefix: str = 'checkpoint_',
+               keep: int = 0,                 # keep=0 ⇒ keep everything
+               overwrite: bool = False):
     """
-    Saves a Flax/JAX PyTree (e.g., TrainState) to `ckpt_dir`.
-    If `is_replicated=True`, it unreplicates before saving.
+    Save a Flax/JAX PyTree (e.g., TrainState) to `ckpt_dir` as a unique file.
+    Files are named like `{prefix}{step}` (e.g., epoch_0001).
+
+    - `prefix` controls the filename prefix (e.g., 'epoch_').
+    - `keep=0` keeps all checkpoints (no deletion policy).
+    - `overwrite=False` prevents clobbering an existing step file.
     """
     os.makedirs(ckpt_dir, exist_ok=True)
-    to_save = flax.jax_utils.unreplicate(state) if is_replicated else state
-    step = int(step if step is not None else getattr(to_save, "step", 0))
     checkpoints.save_checkpoint(
         ckpt_dir=ckpt_dir,
-        target=to_save,
-        step=step,
+        target=state,
+        step=int(step),
+        prefix=prefix,
         keep=keep,
         overwrite=overwrite,
     )
@@ -110,15 +118,13 @@ def load_state(ckpt_dir: str,
                state_template,
                *,
                is_replicated: bool = False):
-    """
-    Restores a checkpoint into a PyTree with the same structure as `state_template`.
-    If `is_replicated=True`, it replicates after loading.
-    """
+    """Simple restore (no replication in JIT-only mode)."""
     restored = checkpoints.restore_checkpoint(ckpt_dir, target=state_template)
-    return flax.jax_utils.replicate(restored) if is_replicated else restored
+    return restored
 
-
-# TrainState class for managing model parameters and optimizer state
+# ---------------------------
+# TrainState (no pmap usage)
+# ---------------------------
 class TrainState(flax.struct.PyTreeNode):
     step: int
     apply_fn: Callable = nonpytree_field()
@@ -131,17 +137,13 @@ class TrainState(flax.struct.PyTreeNode):
 
     @classmethod
     def create(cls, model_def: nn.Module, params, batch_stats=None, tx=None, rng=None, **kwargs):
-        if tx is not None:
-            opt_state = tx.init(params)
-        else:
-            opt_state = None
-
+        opt_state = tx.init(params) if tx is not None else None
         return cls(
             step=1, apply_fn=model_def.apply, model_def=model_def, params=params,
             batch_stats=batch_stats, tx=tx, opt_state=opt_state, rng=rng, **kwargs,
         )
 
-    # Call model_def.apply_fn
+    # Call model_def.apply
     def __call__(self, *args, params=None, batch_stats=None, method=None, **kwargs):
         if params is None:
             params = self.params
@@ -151,42 +153,32 @@ class TrainState(flax.struct.PyTreeNode):
         if isinstance(method, str):
             method = getattr(self.model_def, method)
         return self.apply_fn(variables, *args, method=method, **kwargs)
-    
-    # Shortcut for above
-    def do(self, method):
-        return functools.partial(self, method=method)
 
-    def apply_gradients(self, grads, **kwargs):
-        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
-        new_params = optax.apply_updates(self.params, updates)
-        # advance step and split RNG for next call
-        new_rng, _ = jax.random.split(self.rng) if self.rng is not None else (None, None)
-        return self.replace(step=self.step + 1, params=new_params,
-                            opt_state=new_opt_state, rng=new_rng, **kwargs)
+# ---------------------------
+# JIT-compiled train step
+# ---------------------------
+@jax.jit
+def train_step(state: TrainState,
+               images: jnp.ndarray,
+               states: jnp.ndarray,
+               actions: jnp.ndarray,
+               text_tokens: jnp.ndarray,
+               attention_mask: jnp.ndarray,
+               batch_targets: jnp.ndarray):
+    """
+    Single-device, JIT-compiled training step.
+    Returns new_state and scalar metrics (including norms).
+    """
 
-    def apply_loss_fn(self, *, loss_fn, has_aux=False):
-        """
-        Takes a gradient step towards minimizing `loss_fn`.
-        """
-        if has_aux:
-            grads, info = jax.grad(loss_fn, has_aux=has_aux)(self.params)
-            return self.apply_gradients(grads=grads), info
-        else:
-            grads = jax.grad(loss_fn, has_aux=has_aux)(self.params)
-            return self.apply_gradients(grads=grads)
-
-# Training function
-def train_step(state, images, states, actions, text_tokens, attention_mask, batch_targets):
-    """Single training step using TrainState."""
-    
-    # fold in step to get a per-step dropout key (optional but good hygiene)
-    dropout_rng = None
+    # Per-step RNG for dropout (fold in step for deterministic variation)
     if state.rng is not None:
-        dropout_rng = jax.random.fold_in(state.rng, state.step)
+        step_key = jax.random.fold_in(state.rng, state.step)
+        dropout_rng, new_base_rng = jax.random.split(step_key)
+    else:
+        dropout_rng, new_base_rng = None, None
 
-    def loss_fn(params):
-        variables = {"params": params, "batch_stats": state.batch_stats}
-        # IMPORTANT: make batch_stats mutable and pass dropout rng
+    def loss_fn(params, batch_stats):
+        variables = {"params": params, "batch_stats": batch_stats}
         (action_pred_arm, action_pred_gripper), mutable = state.apply_fn(
             variables,
             images, states, actions,
@@ -199,106 +191,148 @@ def train_step(state, images, states, actions, text_tokens, attention_mask, batc
         loss_arm = optax.l2_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
         loss_grip = optax.l2_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
         loss = loss_arm + 0.1 * loss_grip
-        # return updated batch_stats via aux
-        return loss, {'loss_arm': loss_arm, 'loss_grip': loss_grip, 'batch_stats': mutable['batch_stats']}
+        new_bstats = mutable['batch_stats']
+        return loss, (new_bstats, loss_arm, loss_grip)
 
-    # Take a grad step; info carries accuracy and new batch_stats
-    new_state, info = state.apply_loss_fn(loss_fn=loss_fn, has_aux=True)
-    new_state = new_state.replace(batch_stats=info['batch_stats'])
-    return new_state, {'loss_arm': info['loss_arm'], 'loss_grip': info['loss_grip']}
+    (loss, (new_bstats, loss_arm, loss_grip)), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        state.params, state.batch_stats
+    )
 
-def train_epoch(state, train_ds, args, num_batches_per_epoch=None):
-    """Train for one epoch."""
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+    new_params = optax.apply_updates(state.params, updates)
+
+    # Norms for logging
+    grad_norm   = optax.global_norm(grads)
+    update_norm = optax.global_norm(updates)
+    param_norm  = optax.global_norm(new_params)
+
+    new_state = state.replace(
+        step=state.step + 1,
+        params=new_params,
+        opt_state=new_opt_state,
+        batch_stats=new_bstats,
+        rng=new_base_rng,
+    )
+    metrics = {
+        'loss_arm': loss_arm,
+        'loss_grip': loss_grip,
+        'grad_norm': grad_norm,
+        'update_norm': update_norm,
+        'param_norm': param_norm,
+    }
+    return new_state, metrics
+
+# ---------------------------
+# Epoch loop (host logging)
+# ---------------------------
+def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0):
+    """Train for one epoch (JIT-only)."""
     epoch_loss = 0.0
     num_batches = 0
-    
-    # Save checkpoint
 
-    ckpt_dir = os.path.join(args.root_dir, 'checkpoints', 'trial')
+    # Optional: save a checkpoint at start of epoch via your custom Checkpoint util
+    # ckpt_dir = os.path.join(args.root_dir, 'checkpoints', 'trial')
+    # if jax.process_index() == 0:
+    #     model_single = state
+    #     cp = Checkpoint(ckpt_dir, parallel=False)
+    #     cp.set_model(model_single)
+    #     cp.save()
+    #     del cp, model_single
+    #     print(f"Checkpoint saved at {ckpt_dir}")
+    # Save a checkpoint each epoch
     if jax.process_index() == 0:
-        # try:
-        #     model_single = flax.jax_utils.unreplicate(state)
-        # except:
-        #     model_single = state
-        model_single = state
-        cp = Checkpoint(ckpt_dir, parallel=False)
-        cp.set_model(model_single)
-        cp.save()
-        del cp, model_single
-        print(f"Checkpoint saved at {ckpt_dir}")
+        run_stamp = (datetime.now(_tz) if _tz else datetime.now()).strftime("%Y%m%d_%H%M%S")
+        ckpt_dir = os.path.join(args.root_dir, "checkpoints", f"jit_{run_stamp}")
+        
+        # save_state(ckpt_dir, state, step=int(state.step), is_replicated=False)
+        save_state(
+            ckpt_dir,
+            state,
+            step=epoch + 1,
+            prefix='epoch_',              # => epoch_1, epoch_2, ...
+        )
 
     for batch in train_ds:
         rgb_static, text_tokens, actions_all, wrist_rgb, states_orig = extract_batch(batch)
 
-        rgb_static = rgb_static[:, :-args.action_pred_steps]
-        wrist_rgb = wrist_rgb[:, :-args.action_pred_steps]
-        actions = actions_all[:, :-args.action_pred_steps]
-        states_orig = states_orig[:, :-args.action_pred_steps]
+        # Leave room for k-step prediction targets
+        k = args.action_pred_steps
+        rgb_static = rgb_static[:, :-k]
+        wrist_rgb  = wrist_rgb[:,  :-k]
+        actions    = actions_all[:, :-k]
+        states_orig = states_orig[:, :-k]
 
+        # Keep 6D arm + gripper flag, map gripper from [-1,1] -> {0,1}
         states = torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
-        states[..., 6:] = (states[..., 6:] + 1) // 2
+        states[..., 6:]  = (states[..., 6:] + 1) // 2
         actions[..., 6:] = (actions[..., 6:] + 1) // 2
 
-        # breakpoint()
-        
-        B, T, C, H, W = rgb_static.shape
-        images = torch.cat([rgb_static.unsqueeze(dim=1), wrist_rgb.unsqueeze(dim=1)], dim=1)
-        Ni = 2
-        images = images.numpy()
-        actions = actions.numpy()
-        states = states.numpy()
-        text_tokens = text_tokens.numpy()
-        attention_mask = generate_attention_mask(T, Ni + 1 + 1, args.action_pred_steps)
-        attention_mask = jnp.array(attention_mask, dtype=bool)
-        # breakpoint()
-        
-        # Generate targets for action prediction
-        # batch_targets = actions_all[:, args.action_pred_steps:]
-        batch_targets = torch.cat([actions_all[:, j:args.sequence_length-args.action_pred_steps+j, :].unsqueeze(-2) for j in range(args.action_pred_steps)], dim=-2) 
-        batch_targets = batch_targets.numpy()
-        # breakpoint()
+        # Build images (B, 2, T, C, H, W)
+        images = torch.cat([rgb_static.unsqueeze(1), wrist_rgb.unsqueeze(1)], dim=1)
+        B, Ni, T, C, H, W = images.shape
 
-        # Convert all to jnp.ndarray
-        images = jnp.asarray(images)
-        actions = jnp.asarray(actions)
-        states = jnp.asarray(states)
-        text_tokens = jnp.asarray(text_tokens)
-        attention_mask = jnp.asarray(attention_mask)
-        batch_targets = jnp.asarray(batch_targets)
-        
-        # Training step
-        state, train_info = train_step(state, images, states, actions, text_tokens, attention_mask, batch_targets)
-        
-        # Accumulate metrics
-        epoch_loss += train_info['loss_arm'] + 0.1 * train_info['loss_grip']  # Using accuracy as proxy for loss tracking
+        # Attention mask (L, L) -> jnp.bool_
+        attention_mask = generate_attention_mask(T, Ni + 1 + 1, k)
+        attention_mask = jnp.asarray(attention_mask, dtype=bool)
+
+        # Targets (B, T, k, A)
+        targets = torch.cat(
+            [actions_all[:, j:args.sequence_length - k + j, :].unsqueeze(-2) for j in range(k)],
+            dim=-2
+        )
+
+        # Torch -> NumPy -> JAX
+        def to_np(*xs):
+            outs = []
+            for x in xs:
+                outs.append(x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x)
+            return outs if len(outs) > 1 else outs[0]
+
+        images_np, actions_np, states_np, tokens_np, targets_np = to_np(
+            images, actions, states, text_tokens, targets
+        )
+        images_jnp      = jnp.asarray(images_np)
+        actions_jnp     = jnp.asarray(actions_np)
+        states_jnp      = jnp.asarray(states_np)
+        text_tokens_jnp = jnp.asarray(tokens_np)
+        targets_jnp     = jnp.asarray(targets_np)
+
+        # JIT step
+        state, train_info = train_step(
+            state, images_jnp, states_jnp, actions_jnp, text_tokens_jnp, attention_mask, targets_jnp
+        )
+
+        # Host logging (convert DeviceArrays to Python floats)
+        info_host = jax.device_get(train_info)
+        epoch_loss += float(info_host['loss_arm']) + 0.1 * float(info_host['loss_grip'])
         num_batches += 1
-        # Log
+
         if jax.process_index() == 0:
             wandb.log({
-                'training/loss_arm': train_info['loss_arm'],
-                'training/loss_grip': train_info['loss_grip'],
-                'training/loss': train_info['loss_arm'] + 0.1 * train_info['loss_grip'],
+                'training/loss_arm': float(info_host['loss_arm']),
+                'training/loss_grip': float(info_host['loss_grip']),
+                'training/loss': float(info_host['loss_arm']) + 0.1 * float(info_host['loss_grip']),
+                'training/grad_norm': float(info_host['grad_norm']),
+                'training/update_norm': float(info_host['update_norm']),
+                'training/param_norm': float(info_host['param_norm']),
                 'training/num_batches': num_batches,
-            }, step=state.step)
-        
-        # Limit batches per epoch if specified (for faster training)
+            }, step=int(state.step))
+
         if num_batches_per_epoch and num_batches >= num_batches_per_epoch:
             break
-    
-    avg_loss = epoch_loss / num_batches
+
+    avg_loss = epoch_loss / max(1, num_batches)
     return state, avg_loss
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Minimal setup to build the data loader
     clip_model, image_processor = clip.load("ViT-B/32", device=device)
     parser = get_parser(is_eval=False)
     args = parser.parse_args()
-    # print(args)
 
     run = wandb.init(
-        project="vlaft",           # your W&B project
-        name="bc_run_001",             # optional human-readable name
+        project="vlaft",
+        name="bc_run_001",
         config={
             "lr": args.learning_rate,
             "batch_size": args.batch_size,
@@ -306,29 +340,19 @@ def main():
             "dataset": "LIBERO",
             "model": "BCSimple",
         },
-        # entity="your-team",          # uncomment if you use a W&B team/org space
-        # group="exp-ablation-1",      # optional: group related runs
-        # tags=["bc", "libero"],       # optional: quick filtering in UI
     )
 
-    # Create wandb logger
-    # if jax.process_index() == 0:
-    #     setup_wandb(args.to_dict())
-
-
     print("Building dataset...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    clip_model, image_processor = clip.load("ViT-B/32", device=device)
     dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
     loader = dataset.dataloader
     it = iter(loader)
 
-    # Peek one batch to configure model shapes
+    # Peek one batch to configure shapes
     batch0 = next(it)
     rgb_static, text0, actions0, wrist_rgb, states_orig = extract_batch(batch0)
     states0 = torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
     states0[..., 6:] = (states0[..., 6:] + 1) // 2
-    images0 = torch.cat([rgb_static.unsqueeze(dim=1), wrist_rgb.unsqueeze(dim=1)], dim=1)
+    images0 = torch.cat([rgb_static.unsqueeze(1), wrist_rgb.unsqueeze(1)], dim=1)
     actions0[..., 6:] = (actions0[..., 6:] + 1) // 2
 
     B, Ni, T, C, H, W = images0.shape
@@ -338,14 +362,11 @@ def main():
     actions0 = actions0.numpy()
     states0 = states0.numpy()
     text0 = text0.numpy()
-    # breakpoint()
 
-    # Build GPT config consistent with BCSimple settings
-    # IMPORTANT: block_size must be >= T*(Ni + 1 + 1 + 3)
+    # GPT config (block_size must be >= T*(Ni + 1 + 1 + 3))
     hidden_dim = 768
     num_layers = 6
     num_heads = 8
-    # action_pred_steps = 3
     gpt_conf = GPTConfig(
         block_size=T * (Ni + 1 + 1 + 3),
         num_layers=num_layers,
@@ -369,7 +390,7 @@ def main():
         config=gpt_conf,
     )
 
-    # Init model
+    # Init model (JIT-only)
     rng = jax.random.PRNGKey(args.seed)
     rng, params_key, dropout_key = jax.random.split(rng, 3)
     variables = model_def.init(
@@ -383,28 +404,18 @@ def main():
     batch_stats = variables.get('batch_stats', None)
 
     tx = optax.adam(args.learning_rate)
-    # state = TrainState.create(model_def, apply_fn=model_def.apply, params=params, tx=tx)
-    state = TrainState.create(model_def, params, batch_stats=batch_stats, tx=tx, rng=params_key)
-    state = state.replace(batch_stats=batch_stats, rng=rng)
-    # breakpoint()
+    state = TrainState.create(model_def, params, batch_stats=batch_stats, tx=tx, rng=rng)
 
-    # for data in dataset.dataloader:
-    #     breakpoint()
-
-    # Training loop
+    # Training loop (JIT-only)
     for epoch in range(args.num_epochs):
         print(f"Epoch {epoch + 1}/{args.num_epochs}")
-        
-        # Train for one epoch
-        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None)  # Limit batches for faster training
-        
+        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch)
         print(f"  Train Loss: {train_loss:.4f}")
         print(f"  Step: {state.step}")
         print("-" * 50)
-    
-    print(f"\nTraining completed!")
-    print(f"Final step: {state.step}")
 
+    print("\nTraining completed!")
+    print(f"Final step: {state.step}")
     run.finish()
 
 if __name__ == "__main__":

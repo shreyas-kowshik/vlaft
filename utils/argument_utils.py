@@ -20,7 +20,7 @@ def get_parser(is_eval=False):
         help="used to name saving directory and wandb run",
     )
     parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=40)
     # Sum of gradient optimization batch size
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
