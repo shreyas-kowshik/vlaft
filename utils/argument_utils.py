@@ -159,7 +159,7 @@ def get_parser(is_eval=False):
     parser.add_argument("--loss_arm_action_ratio", type=float, default=1.0)
     parser.add_argument("--loss_gripper_action_ratio", type=float, default=0.01)   
     # action_pred_steps
-    parser.add_argument("--action_pred_steps", type=int, default=1)
+    parser.add_argument("--action_pred_steps", type=int, default=3)
     # obs_pred
     parser.add_argument("--obs_pred", default=False, action="store_true")
     parser.add_argument("--atten_only_obs", default=False, action="store_true")

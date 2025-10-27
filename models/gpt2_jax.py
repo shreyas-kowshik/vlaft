@@ -98,7 +98,7 @@ class GPT(nn.Module):
         for i in range(self.config.num_layers):
             x = Block(self.config, name=str(i))(x, attn_mask, deterministic=deterministic)
 
-        x = nn.LayerNorm(1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias, name='ln_f')(x)
+        x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias, name='ln_f')(x)
 
         return x
 

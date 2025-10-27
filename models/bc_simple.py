@@ -15,7 +15,7 @@ from flax.linen.initializers import normal
 
 import clip
 from transformers import AutoProcessor, FlaxCLIPModel
-from gpt2_jax import GPT, GPTConfig
+from models.gpt2_jax import GPT, GPTConfig
 
 def generate_attention_mask(K, num_A, num_B):
     # num_A: 1+1+self.NUM_RESAMPLER_QUERY*2+1*2
@@ -97,7 +97,7 @@ class BCSimple(nn.Module):
         self.text_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
         self.timestep_embedding = TimestepEmbedder(self.hidden_dim)
         self.action_embedding = self.param(
-            "embedding",
+            "actino_embedding",
             normal(stddev=0.02),      # init_fn(key, shape, dtype) -> array
             (3, self.hidden_dim)
         )
@@ -116,12 +116,13 @@ class BCSimple(nn.Module):
         self.transformer = GPT(self.config)
         
     @nn.compact
-    def __call__(self, images, states, actions, text_tokens, attention_mask,train=False):
+    def __call__(self, images, states, actions, text_tokens, attention_mask, train=False):
         # (x = (B, H, W, C) image, t = (B,) timesteps, y = (B,) class labels)
         # images = (B, num_images, T, H, W, C)
         # states = (B, T, state_dim)
         # actions = (B, T, action_dim)
-        B, num_images, T, H, W, C = images.shape
+        # breakpoint()
+        B, num_images, T, C, H, W = images.shape
         images = images.reshape(-1, H, W, C)
         image_emb = self.image_encoder(images)['block4_1']
         image_emb = image_emb.reshape(B, T, num_images, -1)
@@ -129,10 +130,11 @@ class BCSimple(nn.Module):
 
         state_emb = self.state_encoder(states) # (B, T, hidden_dim)
 
-        text_tokens = text_tokens.reshape(-1, 77)
-        text_emb = self.clip.get_text_features(text_tokens) # (B * T, hidden_dim)
-        text_emb = text_emb.reshape(B, T, -1)
+        text_tokens = text_tokens.reshape(B, -1)
+        text_emb = self.clip.get_text_features(text_tokens, params=self.clip.params, train=False) # (B * T, hidden_dim)
+        # text_emb = text_emb.reshape(B, -1)
         text_emb = self.text_projector(text_emb) # (B, T, hidden_dim)
+        text_emb = jnp.repeat(jnp.expand_dims(text_emb, axis=1), T, axis=1) # (B, T, hidden_dim)
 
         # Add global timestep embedding to images, state, text
         timestep_embedding = self.timestep_embedding(jnp.arange(T)) # (T, hidden_dim)
@@ -189,13 +191,14 @@ if __name__ == "__main__":
     example_text_tokens = jnp.ones((2, 10, 77))
 
     attention_mask = generate_attention_mask(model.sequence_length, model.num_images + 1 + 1, model.action_pred_steps)
-    attention_mask = jnp.array(attention_mask)
+    attention_mask = jnp.array(attention_mask, dtype=bool)
     variables = model.init({'params': params_rng, 'dropout': dropout_rng}, 
                         example_images, example_states, example_actions, example_text_tokens,
                         attention_mask,
                         train=False
                         )
     params = variables['params']
+
     batch_stats = variables['batch_stats']
 
     rng, apply_dropout_rng = jax.random.split(rng)
@@ -206,4 +209,3 @@ if __name__ == "__main__":
                         mutable=['batch_stats'],
                         rngs={'dropout': apply_dropout_rng})
     # print(output.shape)
-    breakpoint()

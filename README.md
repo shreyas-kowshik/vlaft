@@ -49,5 +49,5 @@ class RobotDataset
 ## Training
 
 ```
-python train.py --phase pretrain --root_dir /data/user_data/skowshik/datasets/libero_pro/
+python -m pdb train.py --phase pretrain --learning_rate 0.0001 --root_dir /data/user_data/skowshik/datasets/libero_pro --sequence_length 13
 ```
