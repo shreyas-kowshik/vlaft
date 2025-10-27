@@ -307,6 +307,16 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_s
         epoch_loss += float(info_host['loss_arm']) + 0.1 * float(info_host['loss_grip'])
         num_batches += 1
 
+        # Save every `k` steps here
+        if state.step % args.save_every_iter == 0:
+            save_state(
+                ckpt_dir,
+                state,
+                step=int(state.step),
+                prefix='epoch_nb_' + str(num_batches),
+            )
+            print(f"Checkpoint saved at {ckpt_dir}")
+
         # Current learning rate (host value) for logging
         lr_val = None
         if lr_schedule is not None:
