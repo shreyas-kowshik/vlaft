@@ -225,7 +225,7 @@ def train_step(state: TrainState,
 # ---------------------------
 # Epoch loop (host logging)
 # ---------------------------
-def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0):
+def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_schedule=None):
     """Train for one epoch (JIT-only)."""
     epoch_loss = 0.0
     num_batches = 0
@@ -307,6 +307,11 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0):
         epoch_loss += float(info_host['loss_arm']) + 0.1 * float(info_host['loss_grip'])
         num_batches += 1
 
+        # Current learning rate (host value) for logging
+        lr_val = None
+        if lr_schedule is not None:
+            lr_val = float(jax.device_get(lr_schedule(int(state.step))))
+
         if jax.process_index() == 0:
             wandb.log({
                 'training/loss_arm': float(info_host['loss_arm']),
@@ -314,6 +319,7 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0):
                 'training/loss': float(info_host['loss_arm']) + 0.1 * float(info_host['loss_grip']),
                 'training/grad_norm': float(info_host['grad_norm']),
                 'training/update_norm': float(info_host['update_norm']),
+                'training/lr': lr_val if lr_val is not None else None,
                 'training/param_norm': float(info_host['param_norm']),
                 'training/num_batches': num_batches,
             }, step=int(state.step))
@@ -403,13 +409,33 @@ def main():
     params = variables['params']
     batch_stats = variables.get('batch_stats', None)
 
-    tx = optax.adam(args.learning_rate)
+    # tx = optax.adam(args.learning_rate)  
+    # -------------------------------
+    # Cosine LR schedule w/ warmup
+    # -------------------------------
+    # Total steps is an estimate; if your dataloader has a known length, replace with
+    #   total_steps = args.num_epochs * steps_per_epoch
+    total_steps = getattr(args, 'max_steps', args.num_epochs * 10000)
+    warmup_steps = max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
+    decay_steps  = max(1, total_steps - warmup_steps)
+
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,                 # start at 0
+        peak_value=float(args.learning_rate),
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        end_value=0.0                   # decay to 0
+    )
+    # Use schedule in Adam optimizer
+    tx = optax.adam(lr_schedule)
+
     state = TrainState.create(model_def, params, batch_stats=batch_stats, tx=tx, rng=rng)
 
     # Training loop (JIT-only)
     for epoch in range(args.num_epochs):
         print(f"Epoch {epoch + 1}/{args.num_epochs}")
-        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch)
+        # state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch)
+        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch, lr_schedule=lr_schedule)
         print(f"  Train Loss: {train_loss:.4f}")
         print(f"  Step: {state.step}")
         print("-" * 50)
