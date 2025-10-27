@@ -27,6 +27,7 @@ x = jnp.array(img, dtype=jnp.float32) / 255.0
 x = jnp.expand_dims(x, axis=0)
 
 # Init network
+breakpoint()
 resnet18 = fm.ResNet18(output='logits', pretrained='imagenet')
 params = resnet18.init(key, x)
 
