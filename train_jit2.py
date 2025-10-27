@@ -68,7 +68,7 @@ except Exception:
 from flax.training import checkpoints
 
 from utils.argument_utils import get_parser
-from data.libero_seer import get_libero_pretrain_dataset, get_libero_finetune_dataset
+from data.libero_seer import get_libero_pretrain_dataset
 from models.bc_simple import BCSimple, generate_attention_mask, GPTConfig
 from utils.checkpoint import Checkpoint
 
@@ -359,8 +359,7 @@ def main():
     )
 
     print("Building dataset...")
-    # dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
-    dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False)
+    dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
     loader = dataset.dataloader
     it = iter(loader)
 
