@@ -362,6 +362,7 @@ def main():
     # dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
     dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False)
     loader = dataset.dataloader
+    # breakpoint()
     it = iter(loader)
 
     # Peek one batch to configure shapes
@@ -426,7 +427,7 @@ def main():
     # -------------------------------
     # Total steps is an estimate; if your dataloader has a known length, replace with
     #   total_steps = args.num_epochs * steps_per_epoch
-    total_steps = getattr(args, 'max_steps', args.num_epochs * 10000)
+    total_steps = getattr(args, 'max_steps', args.num_epochs * len(loader))
     warmup_steps = max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
     decay_steps  = max(1, total_steps - warmup_steps)
 

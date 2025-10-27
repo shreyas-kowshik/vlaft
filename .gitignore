@@ -1,0 +1,17 @@
+*.out
+*.err
+*.log
+*.checkpoint
+*.pt
+*.pth
+*.pkl
+*.joblib
+*.job
+*.sh
+*.slurm
+*.sbatch
+*.sbatch.log
+wandb/
+checkpoints/
+__pycache__/
+*.pyc
