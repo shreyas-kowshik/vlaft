@@ -225,7 +225,7 @@ def train_step(state: TrainState,
 # ---------------------------
 # Epoch loop (host logging)
 # ---------------------------
-def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_schedule=None):
+def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_schedule=None, ckpt_dir=None):
     """Train for one epoch (JIT-only)."""
     epoch_loss = 0.0
     num_batches = 0
@@ -240,10 +240,10 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_s
     #     del cp, model_single
     #     print(f"Checkpoint saved at {ckpt_dir}")
     # Save a checkpoint each epoch
+    if ckpt_dir is None:
+        ckpt_dir = os.path.join(args.root_dir, "checkpoints", f"jit_default")
+    
     if jax.process_index() == 0:
-        run_stamp = (datetime.now(_tz) if _tz else datetime.now()).strftime("%Y%m%d_%H%M%S")
-        ckpt_dir = os.path.join(args.root_dir, "checkpoints", f"jit_{run_stamp}")
-        
         # save_state(ckpt_dir, state, step=int(state.step), is_replicated=False)
         save_state(
             ckpt_dir,
@@ -360,8 +360,8 @@ def main():
     )
 
     print("Building dataset...")
-    # dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
-    dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False, dset_name="libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it")
+    dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
+    # dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False, dset_name="libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it")
     loader = dataset.dataloader
     it = iter(loader)
 
@@ -452,11 +452,14 @@ def main():
 
     state = TrainState.create(model_def, params, batch_stats=batch_stats, tx=tx, rng=rng)
 
+    run_stamp = (datetime.now(_tz) if _tz else datetime.now()).strftime("%Y%m%d_%H%M%S")
+    ckpt_dir = os.path.join(args.root_dir, "checkpoints", f"jit_{run_stamp}")
+
     # Training loop (JIT-only)
     for epoch in range(args.num_epochs):
         print(f"Epoch {epoch + 1}/{args.num_epochs}")
         # state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch)
-        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch, lr_schedule=lr_schedule)
+        state, train_loss = train_epoch(state, loader, args, num_batches_per_epoch=None, epoch=epoch, lr_schedule=lr_schedule, ckpt_dir=ckpt_dir)
         print(f"  Train Loss: {train_loss:.4f}")
         print(f"  Step: {state.step}")
         print("-" * 50)

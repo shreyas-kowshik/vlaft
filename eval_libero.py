@@ -18,7 +18,7 @@ os.environ["PYOPENGL_PLATFORM"] = "egl"
 os.environ['MUJOCO_GL'] = 'egl'
 
 # ----------------- CONFIG: point to your JAX checkpoint -----------------
-MODEL_PATH = "/data/user_data/skowshik/datasets/libero_pro/checkpoints/jit_20251027_134550/epoch_nb_124999125000/"  # <- set this
+MODEL_PATH = "/data/user_data/skowshik/datasets/libero_pro/checkpoints/jit_20251028_024223/epoch_7/"  # <- set this
 
 from pathlib import Path
 import copy
@@ -258,6 +258,9 @@ def evaluate_libero_task(task, env, obs, args, model: JAXModelWrapper):
 
 def evaluate_policy_ddp(args, model: JAXModelWrapper):
     # Minimal single-process version (keeps original structure)
+    # TASK_NAME = None
+    TASK_NAME = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.finetune_type]()
     device_num = 1
@@ -281,7 +284,13 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
         exp_id = eval_id % num_eval_episodes
         task = task_suite.get_task(task_id)
         task_name = task.name
+        # breakpoint()
 
+        if TASK_NAME is not None:
+            if TASK_NAME != task_name.lower():
+                print(f"Skipping task {task_name} because it is not the target task {TASK_NAME}")
+                continue
+        
         task_bddl_file = os.path.join(f"{args.libero_path}/libero/libero/bddl_files",
                                       task.problem_folder, task.bddl_file)
         env_args = {
@@ -318,7 +327,8 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
         save_rgbs_to_gif(rgbs, f"gifs/rgbs_{task_name}_{eval_id}.gif")
 
     # print aggregate
-    print_and_save([(r, i) for i, r in enumerate(results)], task_suite)
+    if TASK_NAME is None:
+        print_and_save([(r, i) for i, r in enumerate(results)], task_suite)
 
 def print_and_save(result_list, task_suite):
     for j in range(task_num):
