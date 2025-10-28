@@ -266,7 +266,7 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
     if "libero" in args.finetune_type:
         if args.finetune_type == "libero_10":
             global num_eval_episodes, task_num
-            num_eval_episodes = 20
+            num_eval_episodes = 2
             task_num = 10
             NUM_SEQUENCES = num_eval_episodes * task_num
             eval_sequences = list(range(NUM_SEQUENCES))
@@ -312,11 +312,10 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
         result, rgbs = evaluate_libero_task(task, env, obs, args, model)
         results.append(result)
         print("results so far:", results)
-        breakpoint()
 
         # Make 'gifs' directory
         os.makedirs("gifs", exist_ok=True)
-        save_rgbs_to_gif(rgbs, f"gifs/rgbs_{task_name}.gif")
+        save_rgbs_to_gif(rgbs, f"gifs/rgbs_{task_name}_{eval_id}.gif")
 
     # print aggregate
     print_and_save([(r, i) for i, r in enumerate(results)], task_suite)
