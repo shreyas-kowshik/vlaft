@@ -964,15 +964,13 @@ def get_libero_pretrain_dataset(args, image_processor, tokenizer, epoch=0, floor
 
     return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch, sampler=sampler, dataset=libero_dataset)
 
-def get_libero_finetune_dataset(args, image_processor, tokenizer, epoch=0, floor=False):
-    dataset_names = ["libero_10_converted"]
+def get_libero_finetune_dataset(args, image_processor, tokenizer, epoch=0, floor=False, dset_name="libero_10_converted"):
+    dataset_names = [dset_name]
     shared_epoch = SharedEpoch(epoch=epoch)
     preprocess_image_fn = functools.partial(
         preprocess_image, image_processor=image_processor
     )
     preprocess_text_fn = functools.partial(preprocess_text_calvin, tokenizer=tokenizer)
-
-    # breakpoint()
 
     libero_dataset = DiskLiberoDataset(
         image_fn=preprocess_image_fn,
@@ -992,10 +990,11 @@ def get_libero_finetune_dataset(args, image_processor, tokenizer, epoch=0, floor
         max_window_size=args.max_window_size,
         primary_mode=args.primary_mode,
         small_size=args.small_size,
-        dataset_info='libero_10_converted',
+        dataset_info=dset_name,
         gripper_width=args.gripper_width,
         load_libero_file=args.load_libero_file,
     )
+
     round_fn = math.floor if floor else math.ceil
     num_samples = len(libero_dataset)
     global_batch_size = args.batch_size * 1 # * args.world_size

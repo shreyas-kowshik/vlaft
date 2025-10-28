@@ -191,6 +191,11 @@ class DatasetConverter:
         for path in list(Path(self.src_dir).iterdir()):
             path_name = str(path)
             task_name, task_language = extract_task_information(path_name, self.src_dir)
+
+            if TASK_NAME is not None:
+                if TASK_NAME != task_name:
+                    continue
+            
             demo_data = h5py.File(path_name, 'r')['data']
             num_episode = len(demo_data)
             dataset = {
@@ -210,6 +215,12 @@ class DatasetConverter:
         total_step = 0
         for path in list(Path(self.src_dir).iterdir()):
             path_name = str(path)
+            task_name, task_language = extract_task_information(path_name, self.src_dir)
+
+            if TASK_NAME is not None:
+                if TASK_NAME != task_name:
+                    continue
+            
             demo_data = h5py.File(path_name, 'r')['data']
             num_episode = len(demo_data)
             for i in range(num_episode):
@@ -217,18 +228,32 @@ class DatasetConverter:
                 data_info.append([str(episode_idx).zfill(6), num_steps])
                 episode_idx += 1
                 total_step += num_steps
-        # print(total_step)
-        with open(f'./data_info/{dataset_name}_converted.json', 'w') as f:
-            json.dump(data_info, f)
 
-def main(rank, port, num_worker, start_episode_idx=0, end_episode_idx=None):
+        if TASK_NAME is None:
+            with open(f'./data_info/{dataset_name}_converted.json', 'w') as f:
+                json.dump(data_info, f)
+        else:
+            with open(f'./data_info/{dataset_name}_converted_{TASK_NAME}.json', 'w') as f:
+                json.dump(data_info, f)
+
+def main(rank, port, num_worker, start_episode_idx=0, end_episode_idx=None, task_id=None):
+    # breakpoint()
+    global TASK_NAME
+    TASK_NAME = None
+
     if num_worker > 1:
         setup(rank, world_size=num_worker, port=port)
+    # else:
+    TASK_NAME = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
 
     global dataset_name
     dataset_name = "libero_10" # "libero_10"
     src_dir = f"/data/user_data/skowshik/datasets/libero_pro/{dataset_name}"
-    tgt_dir = Path(f"/data/user_data/skowshik/datasets/libero_pro/{dataset_name}_converted")
+
+    if TASK_NAME is None:
+        tgt_dir = Path(f"/data/user_data/skowshik/datasets/libero_pro/{dataset_name}_converted")
+    else:
+        tgt_dir = Path(f"/data/user_data/skowshik/datasets/libero_pro/{dataset_name}_converted_{TASK_NAME}")
     tgt_dir.mkdir(exist_ok=True) 
 
     dataset_converter = DatasetConverter(
@@ -248,6 +273,10 @@ if __name__ == '__main__':
     port = (random.randint(0, 3000) % 3000) + 27000
 
     assert num_worker > 1
-    mp.spawn(main, args=(port, num_worker, start_episode_idx, end_episode_idx), nprocs=num_worker, join=True)
+    # task_id = 0
+    # mp.spawn(main, args=(port, num_worker, start_episode_idx, end_episode_idx), nprocs=num_worker, join=True)
+    # Single thread for debugging
+    num_worker = 1
+    main(0, port, num_worker, start_episode_idx, end_episode_idx)
 
     # main(0, port, 1, start_episode_idx=start_episode_idx, end_episode_idx=end_episode_idx)

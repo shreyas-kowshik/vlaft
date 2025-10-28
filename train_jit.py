@@ -188,8 +188,8 @@ def train_step(state: TrainState,
             mutable=['batch_stats'],
             rngs={'dropout': dropout_rng} if dropout_rng is not None else None
         )
-        loss_arm = optax.l2_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
-        loss_grip = optax.l2_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
+        loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
+        loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
         loss = loss_arm + 0.1 * loss_grip
         new_bstats = mutable['batch_stats']
         return loss, (new_bstats, loss_arm, loss_grip)
@@ -255,6 +255,8 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_s
     for batch in train_ds:
         rgb_static, text_tokens, actions_all, wrist_rgb, states_orig = extract_batch(batch)
 
+        actions_all[..., 6:] = (actions_all[..., 6:] + 1) // 2
+
         # Leave room for k-step prediction targets
         k = args.action_pred_steps
         rgb_static = rgb_static[:, :-k]
@@ -265,7 +267,6 @@ def train_epoch(state, train_ds, args, num_batches_per_epoch=None, epoch=0, lr_s
         # Keep 6D arm + gripper flag, map gripper from [-1,1] -> {0,1}
         states = torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
         states[..., 6:]  = (states[..., 6:] + 1) // 2
-        actions[..., 6:] = (actions[..., 6:] + 1) // 2
 
         # Build images (B, 2, T, C, H, W)
         images = torch.cat([rgb_static.unsqueeze(1), wrist_rgb.unsqueeze(1)], dim=1)
@@ -360,14 +361,22 @@ def main():
 
     print("Building dataset...")
     # dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
-    dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False)
+    dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False, dset_name="libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it")
     loader = dataset.dataloader
-    # breakpoint()
     it = iter(loader)
 
     # Peek one batch to configure shapes
     batch0 = next(it)
     rgb_static, text0, actions0, wrist_rgb, states_orig = extract_batch(batch0)
+    # Assertions for sanity checking
+    assert len(rgb_static.shape) == 5
+    assert len(wrist_rgb.shape) == 5
+    assert len(states_orig.shape) == 3
+    assert len(actions0.shape) == 3
+    assert len(text0.shape) == 2
+    assert rgb_static.shape[0] == wrist_rgb.shape[0] == states_orig.shape[0] == actions0.shape[0] == text0.shape[0]
+    assert rgb_static.shape[1] == wrist_rgb.shape[1] == states_orig.shape[1] == actions0.shape[1]
+
     states0 = torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
     states0[..., 6:] = (states0[..., 6:] + 1) // 2
     images0 = torch.cat([rgb_static.unsqueeze(1), wrist_rgb.unsqueeze(1)], dim=1)
