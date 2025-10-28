@@ -124,7 +124,7 @@ class BCSimple(nn.Module):
         # breakpoint()
         B, num_images, T, C, H, W = images.shape
         images = images.reshape(-1, H, W, C)
-        image_emb = self.image_encoder(images)['block4_1']
+        image_emb = self.image_encoder(images, train=train)['block4_1']
         image_emb = image_emb.reshape(B, T, num_images, -1)
         image_emb = self.image_projector(image_emb) # (B, T, num_images, hidden_dim)
 

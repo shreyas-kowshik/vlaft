@@ -51,3 +51,9 @@ class RobotDataset
 ```
 python -m pdb train.py --phase pretrain --learning_rate 0.0001 --root_dir /data/user_data/skowshik/datasets/libero_pro --sequence_length 13
 ```
+
+## Evaluation
+
+```
+python -m pdb eval_libero.py --libero_eval_max_steps 360 --finetune_type libero_10 --libero_img_size 224 --libero_path /home/skowshik/vla/codebase/envs/LIBERO --sequence_length 10 --action_pred_steps 3
+```
