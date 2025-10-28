@@ -148,6 +148,7 @@ class JAXModelWrapper:
     def step(self, obs, goal, timestep):
         # --- preprocess images to (1,1,C,H,W) tensors (SEER style), then to JAX ---
         img = Image.fromarray(obs["agentview_image"])
+
         img_t = self.image_process_fn([img]).unsqueeze(1)     # (1,1,C,H,W)
 
         grip = Image.fromarray(obs["robot0_eye_in_hand_image"])
@@ -228,7 +229,14 @@ class JAXModelWrapper:
 
         # track gripper state for next step
         self.gripper_state = np.array([action_np[-1]], dtype=np.float32)
-        return action_np
+
+        info_dict = {}
+        info_dict["rgb"] = img
+        return action_np, info_dict
+
+def save_rgbs_to_gif(rgbs, path):
+    # rgbs = [Image.fromarray(rgb) for rgb in rgbs]
+    rgbs[0].save(path, save_all=True, append_images=rgbs[1:], duration=100, loop=0)
 
 # ----------------- eval helpers (kept close to SEER) -----------------
 def evaluate_libero_task(task, env, obs, args, model: JAXModelWrapper):
@@ -236,15 +244,17 @@ def evaluate_libero_task(task, env, obs, args, model: JAXModelWrapper):
     success = 0
     model.reset()
     goal = task.language
+    rgbs = []
     while steps < args.libero_eval_max_steps:
-        action = model.step(obs, goal, steps)
+        action, info_dict = model.step(obs, goal, steps)
         steps += 1
+        rgbs.append(info_dict["rgb"])
         obs, reward, done, info = env.step(action)
         if done:
             success = 1
             break
     env.close()
-    return success
+    return success, rgbs
 
 def evaluate_policy_ddp(args, model: JAXModelWrapper):
     # Minimal single-process version (keeps original structure)
@@ -299,9 +309,14 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
         for _ in range(5):
             env.step(np.zeros(7, dtype=np.float32))
 
-        result = evaluate_libero_task(task, env, obs, args, model)
+        result, rgbs = evaluate_libero_task(task, env, obs, args, model)
         results.append(result)
         print("results so far:", results)
+        breakpoint()
+
+        # Make 'gifs' directory
+        os.makedirs("gifs", exist_ok=True)
+        save_rgbs_to_gif(rgbs, f"gifs/rgbs_{task_name}.gif")
 
     # print aggregate
     print_and_save([(r, i) for i, r in enumerate(results)], task_suite)

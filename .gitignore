@@ -13,5 +13,5 @@
 *.sbatch.log
 wandb/
 checkpoints/
-__pycache__/
+__pycache__/*
 *.pyc
