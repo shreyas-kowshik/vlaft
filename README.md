@@ -2,24 +2,43 @@
 
 ## Installation
 
-Install LIBERO and activate `libero` environment
-
 ```
-conda create -n libero2 python=3.10
-conda activate libero2
+conda create -n libero python=3.10
+conda activate libero
 pip install uv
+```
+
+# Install PARL
+Install PARL and activate `parl` environment
+`uv pip install tensorflow_datasets`
+`uv pip install torch`
+`uv pip install -r libero_req.txt`
+`pip install openai-clip`
+
+This seems good to start training
+
+<!-- Install LIBERO and activate `libero` environment
+```
+# Comment out transformers #
+cd LIBERO/
 uv pip install -r requirements.txt
-uv pip install transformers==4.40.2
 uv pip install -e .
+``` -->
+
+<!-- Now install stuff for current repository
+```
+uv pip install transformers==4.40.2
 uv pip install numpy==1.24.1
-
-python -m pip install -U "jax[cuda12]==0.6.2" # Torch breaks a bit as numpy goes to 2.0.0, jax needs it apparently
+uv pip install "jax[cuda12]==0.6.2" # Torch breaks a bit as numpy goes to 2.0.0, jax needs it apparently
+uv pip install tensorflow_cpu
+uv pip install tensorflow_datasets
+uv pip install protobuf==6.33.0
+uv pip install numpy==1.26.4
 ```
 
-From current repository
 ```
-pip install -r requirements.txt
-```
+uv pip install rlds[tensorflow]
+``` -->
 
 ## Checkpoints
 
@@ -49,7 +68,13 @@ class RobotDataset
 ## Training
 
 ```
-python -m pdb train.py --phase pretrain --learning_rate 0.0001 --root_dir /data/user_data/skowshik/datasets/libero_pro --sequence_length 13
+python train_jit.py --phase pretrain --learning_rate 0.0001 --root_dir /data/user_data/skowshik/datasets/libero_pro --sequence_length 13
+```
+
+
+Resume from checkpoint
+```
+python train_jit.py --phase pretrain --learning_rate 0.0001 --root_dir /data/user_data/skowshik/datasets/libero_pro --sequence_length 13 --resume_from_checkpoint /data/user_data/skowshik/datasets/libero_pro/checkpoints/jit_20251028_024223/epoch_7/
 ```
 
 ## Evaluation
