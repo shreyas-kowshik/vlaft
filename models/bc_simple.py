@@ -111,7 +111,7 @@ class BCSimple(nn.Module):
             nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02)), 
             nn.relu,
             nn.Dense(1, kernel_init=nn.initializers.normal(0.02)), 
-            nn.sigmoid
+            # nn.sigmoid
         ])
         self.transformer = GPT(self.config)
         

@@ -18,6 +18,12 @@ uv pip install openai-clip
 uv pip install rlds[tensorflow]
 ```
 
+Change the below path for Babel
+```
+File "/data/user_data/skowshik/anaconda3/envs/parl/lib/python3.11/site-packages/robosuite/utils/log_utils.py", line 71, in __init__
+    fh = logging.FileHandler("/tmp/robosuite.log")
+```
+
 This seems good to start training
 
 <!-- Install LIBERO and activate `libero` environment

@@ -22,6 +22,7 @@ import functools
 
 from data.libero_rlds import LiberoRlds, LiberoRldsConfig, episode_to_windows_with_prefix
 from models.bc_simple import generate_attention_mask, BCSimple, GPTConfig
+from eval_libero_clean import eval_libero10
 
 def make_dataset(root_dir: str, info_path: str, img_primary: int, img_wrist: int):
     builder = LiberoRlds(
@@ -157,7 +158,8 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
                 rngs={'dropout': dropout_rng},
             )
             loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
-            loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
+            # loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
+            loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss = loss_arm + 0.1 * loss_grip
             return loss, (mutable['batch_stats'], loss_arm, loss_grip)
 
@@ -195,21 +197,21 @@ def main():
     image_primary_size = 224
     image_wrist_size = 224
     window_size = 13 # Actual history length is window_size - action_pred_steps
-    batch_size = 2
+    batch_size = 8
     NUM_IMAGES = 2 # Wrist + Static Camera
     action_pred_steps = 3
     history_length = window_size - action_pred_steps
     action_dim = 7
     state_dim = 7
     # Model #
-    hidden_dim = 512
-    num_layers = 12
-    num_heads = 8
+    hidden_dim = 768
+    num_layers = 24
+    num_heads = 12
     # Training #
-    num_epochs = 10
+    num_epochs = 20
     learning_rate = 1e-4
     # Toggles #
-    USE_WANDB = False
+    USE_WANDB = True
     
 
     if USE_WANDB:
@@ -234,8 +236,8 @@ def main():
     train_ds = (
         win_ds
         .shuffle(2048)                   # mix windows from different episodes
-        .batch(batch_size, drop_remainder=True)
-        .prefetch(2)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
+        .batch(batch_size, drop_remainder=False)
+        .prefetch(tf.data.AUTOTUNE)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
     )
 
     # Generate attention mask #
@@ -320,6 +322,7 @@ def main():
     
     print("JIT compilation complete. Starting training...")
 
+
     train_steps = 0
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -358,9 +361,25 @@ def main():
                         'training/update_norm': float(info_dict['update_norm']),
                         'training/lr': learning_rate,
                         'training/param_norm': float(info_dict['param_norm']),
+                        'training/epoch': epoch,
+                        'training/train_steps': train_steps,
                     }, step=int(train_steps))
                 else:
                     print(f"Loss Arm: {info_dict['loss_arm']}, Loss Grip: {info_dict['loss_grip']}, Loss: {info_dict['loss']}, Grad Norm: {info_dict['grad_norm']}, Update Norm: {info_dict['update_norm']}, Param Norm: {info_dict['param_norm']}")
+
+        # Eval #
+        model_dict = {
+            "model_def": model_def,
+            "params": params,
+            "batch_stats": batch_stats,
+        }
+        libero_dir = "/home/skowshik/vla/codebase/envs/LIBERO"
+        task_name = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+        libero_cfg = {
+            "libero_img_size": image_primary_size,
+            "libero_eval_max_steps": 400,
+        }
+        eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=20, libero_cfg=libero_cfg)
 
 if __name__ == "__main__":
     main()
