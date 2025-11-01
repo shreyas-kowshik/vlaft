@@ -121,22 +121,22 @@ class BCSimple(nn.Module):
         # images = (B, num_images, T, H, W, C)
         # states = (B, T, state_dim)
         # actions = (B, T, action_dim)
-        # breakpoint()
-        B, num_images, T, C, H, W = images.shape
-        images = images.reshape(-1, H, W, C)
-        image_emb = self.image_encoder(images, train=train)['block4_1']
-        image_emb = image_emb.reshape(B, T, num_images, -1)
+        # Encoder vision features #
+        B, num_images, T, H, W, C = images.shape
+        images = images.reshape(-1, H, W, C) # (B*T*num_images, H, W, C)
+        image_emb = self.image_encoder(images, train=train)['block4_1'] # (B*T*num_images, 7, 7, 512)
+        image_emb = image_emb.reshape(B, T, num_images, -1) # (B, T, num_images, 7*7*512)
         image_emb = self.image_projector(image_emb) # (B, T, num_images, hidden_dim)
 
+        # Encoder state features #
         state_emb = self.state_encoder(states) # (B, T, hidden_dim)
 
-        text_tokens = text_tokens.reshape(B, -1)
+        # Encoder text features #
+        text_tokens = text_tokens.reshape(B * T, -1) # (B*T, 77 (or context length of clip model))
         text_emb = self.clip.get_text_features(text_tokens, params=self.clip.params, train=False) # (B * T, hidden_dim)
-        # text_emb = text_emb.reshape(B, -1)
-        # breakpoint()
         text_emb = self.text_projector(text_emb) # (B, T, hidden_dim)
-        # breakpoint()
-        text_emb = jnp.repeat(jnp.expand_dims(text_emb, axis=1), T, axis=1) # (B, T, hidden_dim)
+        # text_emb = jnp.repeat(jnp.expand_dims(text_emb, axis=1), T, axis=1) # (B, T, hidden_dim)
+        text_emb = text_emb.reshape(B, T, -1) # (B, T, hidden_dim)
 
         # Add global timestep embedding to images, state, text
         timestep_embedding = self.timestep_embedding(jnp.arange(T)) # (T, hidden_dim)
@@ -154,9 +154,6 @@ class BCSimple(nn.Module):
                             jnp.expand_dims(text_emb, axis=2),
                             jnp.repeat(action_emb, B, axis=0)], axis=2) # (B, T, num_images + 1 + 1 + 3, hidden_dim)
         
-        # Generate attention mask
-        # attention_mask = generate_attention_mask(self.sequence_length, self.num_images + 1 + 1, self.action_pred_steps)
-        # breakpoint()
         transformer_input = transformer_input.reshape(B, -1, self.hidden_dim) # (B, T * (num_images + 1 + 1 + 3), hidden_dim)
         attention_mask = jnp.expand_dims(attention_mask, axis=0)
         transformer_output = self.transformer(transformer_input, attention_mask, deterministic=not train)

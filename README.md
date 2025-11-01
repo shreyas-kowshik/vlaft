@@ -10,11 +10,13 @@ pip install uv
 
 # Install PARL
 Install PARL and activate `parl` environment
-`uv pip install tensorflow_datasets`
-`uv pip install torch`
-`uv pip install -r libero_req.txt`
-`uv pip install openai-clip`
-`uv pip install rlds[tensorflow]`
+```
+uv pip install tensorflow_datasets
+uv pip install torch
+uv pip install -r libero_req.txt
+uv pip install openai-clip
+uv pip install rlds[tensorflow]
+```
 
 This seems good to start training
 

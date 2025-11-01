@@ -360,8 +360,8 @@ def main():
     )
 
     print("Building dataset...")
-    dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
-    # dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False, dset_name="libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it")
+    # dataset = get_libero_pretrain_dataset(args, image_processor, clip, epoch=0, floor=False)
+    dataset = get_libero_finetune_dataset(args, image_processor, clip, epoch=0, floor=False, dset_name="libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it")
     loader = dataset.dataloader
     it = iter(loader)
 
@@ -392,8 +392,8 @@ def main():
 
     # GPT config (block_size must be >= T*(Ni + 1 + 1 + 3))
     hidden_dim = 768
-    num_layers = 6
-    num_heads = 8
+    num_layers = 12
+    num_heads = 12
     gpt_conf = GPTConfig(
         block_size=T * (Ni + 1 + 1 + 3),
         num_layers=num_layers,
@@ -430,6 +430,11 @@ def main():
     params = variables['params']
     batch_stats = variables.get('batch_stats', None)
 
+    # Get param count
+    param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
+    print(f"\n\n\n\n\nParameter count: {param_count}\n\n\n\n\n")
+    breakpoint()
+
     # tx = optax.adam(args.learning_rate)  
     # -------------------------------
     # Cosine LR schedule w/ warmup
@@ -451,6 +456,16 @@ def main():
     tx = optax.adam(lr_schedule)
 
     state = TrainState.create(model_def, params, batch_stats=batch_stats, tx=tx, rng=rng)
+
+    # Load checkpoint if provided
+    # if args.resume_from_checkpoint is not None:
+    #     state = checkpoints.restore_checkpoint(args.resume_from_checkpoint, target=state)
+    #     print(f"Checkpoint loaded from {args.resume_from_checkpoint}")
+
+    #     # Make some changes to ensure recompilation does not happed at every step
+    #     state = jax.tree_util.tree_map(lambda x: jnp.asarray(x) if isinstance(x, (np.ndarray, np.generic)) else x, state)
+    #     state = jax.device_put(state)
+    #     state = state.replace(step=jnp.asarray(state.step))
 
     run_stamp = (datetime.now(_tz) if _tz else datetime.now()).strftime("%Y%m%d_%H%M%S")
     ckpt_dir = os.path.join(args.root_dir, "checkpoints", f"jit_{run_stamp}")

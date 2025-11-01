@@ -211,6 +211,7 @@ class JAXModelWrapper:
             self.state.params, self.state.batch_stats,
             images, state_hist, actions_zero, text_hist, attn
         )  # shapes: (1,T,k,6) and (1,T,k,1)
+        # breakpoint()
 
         # choose the last available time index (same heuristic as SEER)
         sel = Tcur - 1 if Tcur < self.history_len else -1
@@ -269,7 +270,7 @@ def evaluate_policy_ddp(args, model: JAXModelWrapper):
     if "libero" in args.finetune_type:
         if args.finetune_type == "libero_10":
             global num_eval_episodes, task_num
-            num_eval_episodes = 2
+            num_eval_episodes = 20
             task_num = 10
             NUM_SEQUENCES = num_eval_episodes * task_num
             eval_sequences = list(range(NUM_SEQUENCES))
