@@ -1,6 +1,8 @@
 # main.py
 from re import L
 import tensorflow as tf
+import os
+import shutil
 # CRITICAL: Disable GPU for TensorFlow to prevent GPU memory allocation during dataset creation
 # TensorFlow will allocate GPU memory by default if it detects a GPU, even for dataset operations
 tf.config.set_visible_devices([], "GPU")
@@ -10,6 +12,7 @@ tf.random.set_seed(0)
 import jax.numpy as jnp
 import jax
 import torch
+import numpy as np
 
 import rlds
 import clip # To tokenize
@@ -19,10 +22,11 @@ import flax
 import wandb
 import tqdm
 import functools
+from flax.training import checkpoints
 
 from data.libero_rlds import LiberoRlds, LiberoRldsConfig, episode_to_windows_with_prefix
 from models.bc_simple import generate_attention_mask, BCSimple, GPTConfig
-from eval_libero_clean import eval_libero10
+from eval_libero_clean import eval_libero10, save_rgbs_to_gif
 
 def make_dataset(root_dir: str, info_path: str, img_primary: int, img_wrist: int, gripper_width: bool = False):
     builder = LiberoRlds(
@@ -168,7 +172,6 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
             loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss = loss_arm + 0.5 * loss_grip
-            # loss = loss_arm
             return loss, (mutable['batch_stats'], loss_arm, loss_grip)
 
         (loss, (new_batch_stats, loss_arm, loss_grip)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
@@ -202,6 +205,10 @@ def main():
     # Dataloader #
     root_dir = "/data/user_data/skowshik/datasets/libero_pro/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/"
     info_path = "./data_info/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.json"
+    CKPT_DIR = "/data/user_data/skowshik/checkpoints/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/ckpt_dir"
+    if os.path.exists(CKPT_DIR):
+        shutil.rmtree(CKPT_DIR)
+    os.makedirs(CKPT_DIR)
     image_primary_size = 224
     image_wrist_size = 224
     window_size = 13 # Actual history length is window_size - action_pred_steps
@@ -224,16 +231,18 @@ def main():
     num_epochs = 20
     learning_rate = 2e-5
     use_lr_schedule = True
+    num_eval_episodes = 20
     # Toggles #
     USE_WANDB = True
-    EVAL_AFTER_EPOCH = False
+    EVAL_AFTER_EPOCH = True
+    DEBUG_DATA_SUBSET = False
     
 
     if USE_WANDB:
         # Wandb init #
         run = wandb.init(
             project="vlaft",
-            name="bc_run_overfit_debug",
+            name="bc_run_debug_eval_with_train",
             config={
                 "lr": learning_rate,
                 "batch_size": batch_size,
@@ -251,12 +260,12 @@ def main():
     win_ds = ds.flat_map(lambda ep: episode_to_windows_with_prefix(ep, window_size))
     train_ds = (
         win_ds
-        # .shuffle(2048)                   # mix windows from different episodes
+        .shuffle(2048)                   # mix windows from different episodes
         .batch(batch_size, drop_remainder=False)
         .prefetch(tf.data.AUTOTUNE)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
     )
-    # ONLY FOR DEBUGGING PURPOSES #
-    train_ds = train_ds.take(20)
+    if DEBUG_DATA_SUBSET:
+        train_ds = train_ds.take(20)
     debug_batch = next(iter(train_ds))
     images0, states0, actions0, language0 = process_batch(debug_batch)
     # CHECKPOINT: Breakpoint above to check if batching and dataloading is working correctly #
@@ -277,7 +286,7 @@ def main():
         num_embeds=hidden_dim,
         use_bias=True,
         dtype=jnp.float32,
-        dropout_rate=dropout_rate, # DEBUGGING ONLY: DISABLE DROPOUT FOR NOW #
+        dropout_rate=dropout_rate,
     )
 
     model_def = BCSimple(
@@ -360,7 +369,6 @@ def main():
     
     print("JIT compilation complete. Starting training...")
 
-
     train_steps = 0
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -420,11 +428,44 @@ def main():
             libero_cfg = {
                 "libero_img_size": image_primary_size,
                 "libero_eval_max_steps": 400,
+                "gripper_width": gripper_width,
             }
-            eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=20, libero_cfg=libero_cfg)
-        
-        if USE_WANDB:
-            run.finish()
+            results, rollout_rbgs = eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=num_eval_episodes, libero_cfg=libero_cfg)
+            # Sort results and rollouts by values of results
+            sorted_indices = np.argsort(results)
+            results = [results[i] for i in sorted_indices]
+            rollout_rbgs = [rollout_rbgs[i] for i in sorted_indices]
+            print("Results: {}".format(results))
+            # Log best rollout rgb .gif to wandb
+            if USE_WANDB:
+                # Log result success rate
+                success_rate = np.mean(results)
+                wandb.log({
+                    'evaluation/success_rate': success_rate,
+                }, step=train_steps)
+                # Log best rollout rgb .gif to wandb
+                save_rgbs_to_gif(rollout_rbgs[0], "best_rollout_rgb.gif")
+                wandb.log({
+                    "rollout": wandb.Video("best_rollout_rgb.gif", format="gif", fps=11)  # fps is ignored for file paths but OK
+                }, step=train_steps)
+
+    print("Saving checkpoint to {}...".format(CKPT_DIR))
+    ckpt_target = {
+        "params": params,
+        "batch_stats": batch_stats,
+        "opt_state": opt_state,
+        "rng": rng,
+    }
+    checkpoints.save_checkpoint(
+        ckpt_dir=CKPT_DIR,
+        target=ckpt_target,
+        step=train_steps,        # or epoch + 1, your call
+        overwrite=True,          # replace latest
+        keep=3,                  # keep last 3
+    )
+    
+    if USE_WANDB:
+        run.finish()
 
 if __name__ == "__main__":
     main()

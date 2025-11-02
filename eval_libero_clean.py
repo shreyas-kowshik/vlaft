@@ -71,7 +71,7 @@ class JAXModelWrapper:
             # train=False ⇒ deterministic; no mutable collections
             return self.model_def.apply(
                 variables,
-                images, states, actions_zero,
+                images, states,
                 text_tokens, attention_mask,
                 train=False
             )
@@ -185,8 +185,12 @@ class JAXModelWrapper:
         self.gripper_state = np.array([action_np[-1]], dtype=np.float32)
 
         info_dict = {}
-        info_dict["rgb"] = img
+        info_dict["rgb"] = Image.fromarray(obs["agentview_image"])
         return action_np, info_dict
+
+def save_rgbs_to_gif(rgbs, path):
+    # rgbs = [Image.fromarray(rgb) for rgb in rgbs]
+    rgbs[0].save(path, save_all=True, append_images=rgbs[1:], duration=100, loop=0)
 
 # Evaluation functions #
 def evaluate_libero_task(task, env, obs, model, libero_cfg={}):
@@ -238,6 +242,7 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
     model = JAXModelWrapper(model_dict, libero_cfg=libero_cfg)
     
     results = []
+    rollout_rbgs = []
     for eval_id in eval_sequences:
         task_id = eval_id // num_eval_episodes
         exp_id = eval_id % num_eval_episodes
@@ -278,6 +283,7 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
 
         result, rgbs = evaluate_libero_task(task, env, obs, model, libero_cfg=libero_cfg)
         results.append(result)
+        rollout_rbgs.append(rgbs)
         print("results so far:", results)
 
         # Make 'gifs' directory
@@ -287,6 +293,8 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
     # print aggregate
     # if TASK_NAME is None:
     #     print_and_save([(r, i) for i, r in enumerate(results)], task_suite)
+
+    return results, rollout_rbgs
 
 # if __name__ == "__main__":
 #     main()
