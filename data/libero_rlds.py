@@ -109,7 +109,7 @@ class LiberoRldsConfig(tfds.core.BuilderConfig):
         gripper_width: bool = False,
         **kwargs,
     ):
-        super().__init__(version=tfds.core.Version("0.1.2"), **kwargs)
+        super().__init__(version=tfds.core.Version("0.1.3"), **kwargs)
         self.root_dir = root_dir
         self.info_path = info_path
         self.image_primary_size = image_primary_size
@@ -166,6 +166,7 @@ class LiberoRlds(tfds.core.GeneratorBasedBuilder):
                             "action": tfds.features.Tensor(shape=(7,), dtype=tf.float32),
                             "reward": tf.float32,
                             "discount": tf.float32,
+                            "step_id": tf.float32,
                         }
                     ),
                 }
@@ -289,6 +290,7 @@ class LiberoRlds(tfds.core.GeneratorBasedBuilder):
                     "action": self._load_action(other_f),
                     "reward": np.float32(0.0),
                     "discount": np.float32(1.0),
+                    "step_id": np.float32(step_id),
                 }
                 steps.append(step)
                 other_f.close()

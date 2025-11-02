@@ -87,6 +87,7 @@ class BCSimple(nn.Module):
     num_images: int = 2
     action_dim: int = 7
     state_dim: int = 7
+    max_step_id: int = 500
     config: GPTConfig = None
 
     def setup(self):
@@ -102,6 +103,8 @@ class BCSimple(nn.Module):
             (3, self.hidden_dim)
         )
         self.action_timestep_embedding = TimestepEmbedder(self.hidden_dim) # To let the model distinguish between different action predictions within a chunk
+        self.step_id_embedding = nn.Embed(self.max_step_id, self.hidden_dim)
+        self.step_id_projector = nn.Dense(self.hidden_dim)
         self.action_projector_arm = nn.Sequential([
             nn.Dense(self.hidden_dim),
             nn.relu,
@@ -117,7 +120,7 @@ class BCSimple(nn.Module):
         self.transformer = GPT(self.config)
         
     @nn.compact
-    def __call__(self, images, states, text_tokens, attention_mask, train=False):
+    def __call__(self, images, states, text_tokens, attention_mask, step_ids, train=False):
         # (x = (B, H, W, C) image, t = (B,) timesteps, y = (B,) class labels)
         # images = (B, num_images, T, H, W, C)
         # states = (B, T, state_dim)
@@ -130,6 +133,12 @@ class BCSimple(nn.Module):
 
         # Encoder state features #
         state_emb = self.state_encoder(states) # (B, T, hidden_dim)
+
+        # Step id embedding #
+        # Clip step id to max_step_id #
+        step_ids = jnp.clip(step_ids, 0, self.max_step_id - 1)
+        step_id_emb = self.step_id_embedding(step_ids) # (B, T, hidden_dim)
+        step_id_emb = self.step_id_projector(step_id_emb) # (B, T, hidden_dim)
 
         # Encoder text features #
         text_tokens = text_tokens.reshape(B * T, -1) # (B*T, 77 (or context length of clip model))
@@ -155,6 +164,9 @@ class BCSimple(nn.Module):
                             jnp.expand_dims(state_emb, axis=2), 
                             jnp.expand_dims(text_emb, axis=2),
                             jnp.repeat(action_emb, B, axis=0)], axis=2) # (B, T, num_images + 1 + 1 + 3, hidden_dim)
+        
+        # Add the step_id embedding to the transformer input #
+        transformer_input = transformer_input + jnp.expand_dims(step_id_emb, axis=2)
         
         transformer_input = transformer_input.reshape(B, -1, self.hidden_dim) # (B, T * (num_images + 1 + 1 + 3), hidden_dim)
         attention_mask = jnp.expand_dims(attention_mask, axis=0)

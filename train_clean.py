@@ -113,6 +113,7 @@ def process_batch(batch, gripper_width: bool = False):
     wrist_rgb   = jnp.asarray(batch["observation"]["rgb_gripper"].numpy(), dtype=jnp.float32) / 255.0
     states_orig = jnp.asarray(batch["observation"]["robot_obs"].numpy(), dtype=jnp.float32)
     actions0    = jnp.asarray(batch["action"].numpy(), dtype=jnp.float32)
+    step_ids0   = jnp.asarray(batch["step_id"].numpy(), dtype=jnp.int32)
 
     # 2) states: concat first 6 dims with last dim (gripper)
     # torch: torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
@@ -143,9 +144,9 @@ def process_batch(batch, gripper_width: bool = False):
     
     language_tensor, _ = process_language(batch)
     # Convert torch language_tensor to numpy first, then jax array (avoids GPU memory from torch)
-    language0 = jnp.asarray(language_tensor.cpu().numpy())
+    language0 = jnp.asarray(language_tensor.cpu().numpy(), dtype=jnp.int32)
 
-    return images0, states0, actions0, language0
+    return images0, states0, actions0, language0, step_ids0
 
 def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects this format, cannot have model_apply in input to function to be jitted
     @functools.partial(jax.jit)
@@ -153,7 +154,7 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
                     rng, 
                     params, batch_stats, opt_state, # States to update #
                     # Input Data #
-                    images, states, actions, language, attention_mask, batch_targets
+                    images, states, actions, language, attention_mask, batch_targets, step_ids
                 ):
         # print("Train step print for JIT check: {}".format(rng)) # If JIT is enabled, this should not be printed as JIT should ignore this line
         # Split Key #
@@ -163,13 +164,13 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
             variables = {"params": params, "batch_stats": batch_stats}
             (action_pred_arm, action_pred_gripper), mutable = model_apply(
                 variables,
-                images, states, language, attention_mask,
+                images, states, language, attention_mask, step_ids,
                 train=True,
                 mutable=['batch_stats'],
                 rngs={'dropout': dropout_rng},
             )
             loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
-            loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
+            # loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss = loss_arm + 0.5 * loss_grip
             return loss, (mutable['batch_stats'], loss_arm, loss_grip)
@@ -221,15 +222,15 @@ def main():
     gripper_width = True
     if gripper_width:
         state_dim = 8
-    train_ds_len = 20000 # max(1, 20 // batch_size)
+    train_ds_len = 1200 # max(1, 20 // batch_size)
     # Model #
     hidden_dim = 768
     num_layers = 24
     num_heads = 12
-    dropout_rate = 0.1
+    dropout_rate = 0.3
     # Training #
-    num_epochs = 20
-    learning_rate = 2e-5
+    num_epochs = 30
+    learning_rate = 1e-5
     use_lr_schedule = True
     num_eval_episodes = 20
     # Toggles #
@@ -267,7 +268,7 @@ def main():
     if DEBUG_DATA_SUBSET:
         train_ds = train_ds.take(20)
     debug_batch = next(iter(train_ds))
-    images0, states0, actions0, language0 = process_batch(debug_batch)
+    images0, states0, actions0, language0, step_ids0 = process_batch(debug_batch)
     # CHECKPOINT: Breakpoint above to check if batching and dataloading is working correctly #
 
     # Generate attention mask #
@@ -310,25 +311,27 @@ def main():
     # Get some initial data to pass to the model
     print("Initializing model...")
     init_batch = next(iter(train_ds.take(1)))
-    images0, states0, actions0, language0 = process_batch(init_batch, gripper_width=gripper_width)
+    images0, states0, actions0, language0, step_ids0 = process_batch(init_batch, gripper_width=gripper_width)   
     del init_batch  # Clear TF batch from memory
     
     # Condition only to history length
     images0 = images0[:, :, :history_length, ...]
     states0 = states0[:, :history_length, ...]
     language0 = language0[:, :history_length, ...]
+    step_ids0 = step_ids0[:, :history_length, ...]
     # Pass along to init model
     variables = model_def.init(
         {'params': params_key, 'dropout': dropout_key},
         images0, states0, language0,
         attention_mask,
+        step_ids0,
         train=False
     )
     params = variables['params']
     batch_stats = variables.get('batch_stats', None)
     
     # Clear init data from GPU memory
-    del images0, states0, actions0, language0
+    del images0, states0, actions0, language0, step_ids0
     
     param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"\n\n\n\n\nParameter count: {param_count / 1e6} M\n\n\n\n\n")
@@ -336,14 +339,14 @@ def main():
     # Use schedule in Adam optimizer
     if use_lr_schedule:
         total_steps = num_epochs * train_ds_len
-        warmup_steps = max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
+        warmup_steps = 1000 # max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
         decay_steps  = max(1, total_steps - warmup_steps)
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,                 # start at 0
             peak_value=float(learning_rate),
             warmup_steps=warmup_steps,
             decay_steps=decay_steps,
-            end_value=0.0                   # decay to 0
+            end_value=1e-8
         )
         tx = optax.adam(lr_schedule)
     else:
@@ -361,11 +364,12 @@ def main():
     dummy_actions = jnp.zeros((batch_size, history_length, action_dim))
     dummy_language = jnp.zeros((batch_size, history_length, 77), dtype=jnp.int32)
     dummy_targets = jnp.zeros((batch_size, history_length, action_pred_steps, action_dim))
+    dummy_step_ids = jnp.zeros((batch_size, history_length), dtype=jnp.int32)
     _, _, _, _, _ = train_step(
         rng, params, batch_stats, opt_state,
-        dummy_images, dummy_states, dummy_actions, dummy_language, attention_mask, dummy_targets
+        dummy_images, dummy_states, dummy_actions, dummy_language, attention_mask, dummy_targets, dummy_step_ids
     )
-    del dummy_images, dummy_states, dummy_actions, dummy_language, dummy_targets
+    del dummy_images, dummy_states, dummy_actions, dummy_language, dummy_targets, dummy_step_ids
     
     print("JIT compilation complete. Starting training...")
 
@@ -373,15 +377,16 @@ def main():
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
         for (i, tf_batch) in enumerate(train_ds):
-            rng = jax.random.fold_in(rng, i)
+            rng = jax.random.fold_in(rng, train_steps + 1)
 
             # Process a batch for training
-            images0, states0, actions0, language0 = process_batch(tf_batch, gripper_width=gripper_width)
+            images0, states0, actions0, language0, step_ids0 = process_batch(tf_batch, gripper_width=gripper_width)
             # Condition only to history length
             images0 = images0[:, :, :history_length, ...]
             states0 = states0[:, :history_length, ...]
             language0 = language0[:, :history_length, ...]
-            
+            step_ids0 = step_ids0[:, :history_length, ...]
+
             # Generate batch targets
             batch_targets = jnp.concatenate(
                 [jnp.expand_dims(actions0[:, j:-action_pred_steps + j, :], axis=-2) for j in range(action_pred_steps)],
@@ -392,7 +397,7 @@ def main():
             # Train step #
             params, batch_stats, opt_state, rng, info_dict = train_step(
                 rng, params, batch_stats, opt_state,
-                images0, states0, actions0, language0, attention_mask, batch_targets
+                images0, states0, actions0, language0, attention_mask, batch_targets, step_ids0
             )
 
             # Log statistics #

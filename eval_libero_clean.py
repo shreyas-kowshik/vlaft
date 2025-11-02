@@ -62,17 +62,19 @@ class JAXModelWrapper:
         self.gripper_queue = deque(maxlen=self.history_len)
         self.state_queue = deque(maxlen=self.history_len)
         self.text_queue = deque(maxlen=self.history_len)
+        self.step_id_queue = deque(maxlen=self.history_len)
         self.cnt = 0
 
         # jitted inference
         @jax.jit
-        def _infer(params, batch_stats, images, states, actions_zero, text_tokens, attention_mask):
+        def _infer(params, batch_stats, images, states, actions_zero, text_tokens, attention_mask, step_ids):
             variables = {"params": params, "batch_stats": batch_stats}
             # train=False ⇒ deterministic; no mutable collections
             return self.model_def.apply(
                 variables,
                 images, states,
                 text_tokens, attention_mask,
+                step_ids,
                 train=False
             )
         self._infer = _infer
@@ -82,6 +84,7 @@ class JAXModelWrapper:
         self.gripper_queue.clear()
         self.state_queue.clear()
         self.text_queue.clear()
+        self.step_id_queue.clear()
         self.cnt = 0
         # Reset gripper state to closed
         self.gripper_state = np.array([-1.0], dtype=np.float32)
@@ -114,6 +117,7 @@ class JAXModelWrapper:
         self.img_queue.append(img_with_dims)
         self.gripper_queue.append(grip_with_dims)
         self.state_queue.append(st_t)
+        self.step_id_queue.append(jnp.asarray([self.cnt]))
         if len(self.text_queue) == 0:
             tt = jnp.asarray(text_tokens)  # Should be (1, 77) or (77,)
             if tt.ndim == 1:
@@ -129,7 +133,7 @@ class JAXModelWrapper:
         image_wrist   = jnp.concatenate(list(self.gripper_queue), axis=1)# (1, T, H, W, C)
         state_hist    = jnp.concatenate(list(self.state_queue), axis=1)  # (1, T, S)
         text_hist     = jnp.concatenate(list(self.text_queue), axis=1)    # (1, T, 77)
-
+        step_ids_hist = jnp.concatenate(list(self.step_id_queue), axis=0)[None, :]  # (1, T)
         Tcur = int(image_primary.shape[1])
         if Tcur < self.history_len:
             need = self.history_len - Tcur
@@ -139,7 +143,8 @@ class JAXModelWrapper:
                                              jnp.repeat(image_wrist[:, -1:], repeats=need, axis=1)], axis=1)
             state_hist    = jnp.concatenate([state_hist,
                                              jnp.repeat(state_hist[:, -1:], repeats=need, axis=1)], axis=1)
-
+            step_ids_hist = jnp.concatenate([step_ids_hist,
+                                             jnp.repeat(step_ids_hist[:, -1:], repeats=need, axis=1)], axis=1)
         # combine two views to (B=1, Ni=2, T, H, W, C) - model expects channels last!
         images = jnp.stack([image_primary, image_wrist], axis=1)
         B, Ni, T, H, W, C = images.shape  # Fixed: Model expects (B, Ni, T, H, W, C) not (B, Ni, T, C, H, W)
@@ -160,7 +165,7 @@ class JAXModelWrapper:
         # forward (jitted)
         action_pred_arm, action_pred_grip = self._infer(
             self.model_dict["params"], self.model_dict["batch_stats"],
-            images, state_hist, actions_zero, text_hist, attn
+            images, state_hist, actions_zero, text_hist, attn, step_ids_hist
         )  # shapes: (1,T,k,6) and (1,T,k,1)
 
         # choose the last available time index (same heuristic as SEER)
@@ -186,6 +191,9 @@ class JAXModelWrapper:
 
         info_dict = {}
         info_dict["rgb"] = Image.fromarray(obs["agentview_image"])
+
+        self.cnt += 1
+
         return action_np, info_dict
 
 def save_rgbs_to_gif(rgbs, path):
