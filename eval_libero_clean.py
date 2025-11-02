@@ -39,6 +39,7 @@ import jax.numpy as jnp
 from PIL import Image
 import clip
 import torch
+import h5py
 
 # Utility functions #
 def quaternion_to_euler(q):
@@ -213,13 +214,21 @@ def evaluate_libero_task(task, env, obs, model, libero_cfg={}):
         uniq_tokens = clip.tokenize([goal], truncate=True)   # (1, 77)
         # Move to CPU explicitly to avoid GPU memory accumulation
         uniq_tokens = uniq_tokens.cpu()
-    goal_tokens = uniq_tokens.numpy()  # (1, 77)
+        goal_tokens = uniq_tokens.numpy()  # (1, 77)
+    # Free torch tensor
+    del uniq_tokens
     
     rgbs = []
 
     max_eval_steps = libero_cfg.get("libero_eval_max_steps", 400)
     while steps < max_eval_steps:
         action, info_dict = model.step(obs, goal_tokens)
+
+        # Debug #
+        gt_action = libero_cfg["demo_data"]["actions"][()][steps]
+        breakpoint()
+        action = gt_action
+        
         steps += 1
         rgbs.append(info_dict["rgb"])
         obs, reward, done, info = env.step(action)
@@ -248,6 +257,7 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
 
     # Create a model wrapper for evaluation #
     model = JAXModelWrapper(model_dict, libero_cfg=libero_cfg)
+    breakpoint()
     
     results = []
     rollout_rbgs = []
@@ -271,28 +281,46 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
             "render_gpu_device_id": 0,
         }
         env = OffScreenRenderEnv(**env_args)
+
+        # # set initial state
+        # init_states_path = os.path.join(
+        #     f"{libero_path}/libero/libero/init_files", task.problem_folder, task.init_states_file
+        # )
+        # import torch  # only for loading the init_state .pt
+        # init_states = torch.load(init_states_path, weights_only=False) # Version mismatch change to include `weights_only=False`
+        # init_state = init_states[exp_id]
+
+        # Load initial state from demo data #
+        BASE_PATH = "/data/user_data/skowshik/datasets/libero_pro/libero_10"
+        TASK_NAME = "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+        task_id = 9
+        DEMO_ID = 0
+        traj_file = h5py.File(os.path.join(BASE_PATH, TASK_NAME + "_demo.hdf5"), "r")
+        demo_data = traj_file['data']['demo_{}'.format(DEMO_ID)]
+        init_state = demo_data['states'][()][0]
+
         env.task_id = task_id
         env.task_name = task_name
         env.task_suite_name = "libero_10"
         env.reset()
         env.seed(0)
-
-        # set initial state
-        init_states_path = os.path.join(
-            f"{libero_path}/libero/libero/init_files", task.problem_folder, task.init_states_file
-        )
-        import torch  # only for loading the init_state .pt
-        init_states = torch.load(init_states_path, weights_only=False) # Version mismatch change to include `weights_only=False`
-        init_state = init_states[exp_id]
         obs = env.set_init_state(init_state)
+        libero_cfg["demo_data"] = demo_data
 
         for _ in range(5):
             env.step(np.zeros(7, dtype=np.float32))
+        breakpoint()
 
         result, rgbs = evaluate_libero_task(task, env, obs, model, libero_cfg=libero_cfg)
         results.append(result)
         rollout_rbgs.append(rgbs)
         print("results so far:", results)
+        
+        # Cleanup environment and file handle
+        del env
+        traj_file.close()
+        import gc
+        gc.collect()
 
         # Make 'gifs' directory
         # os.makedirs("gifs", exist_ok=True)

@@ -206,7 +206,7 @@ def main():
     # Dataloader #
     root_dir = "/data/user_data/skowshik/datasets/libero_pro/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/"
     info_path = "./data_info/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.json"
-    CKPT_DIR = "/data/user_data/skowshik/checkpoints/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/ckpt_dir"
+    CKPT_DIR = "/data/user_data/skowshik/checkpoints/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/one_demo_ckpt_dir"
     if os.path.exists(CKPT_DIR):
         shutil.rmtree(CKPT_DIR)
     os.makedirs(CKPT_DIR)
@@ -227,7 +227,7 @@ def main():
     hidden_dim = 768
     num_layers = 24
     num_heads = 12
-    dropout_rate = 0.3
+    dropout_rate = 0.0
     # Training #
     num_epochs = 30
     learning_rate = 1e-5
@@ -255,13 +255,15 @@ def main():
 
     # DATASET CREATION #
     ds = make_dataset(root_dir, info_path, image_primary_size, image_wrist_size, gripper_width=gripper_width) # Dataset of episodes
+    # Keep only first episode for DEBUGGING #
+    ds = ds.take(1)
 
     # Create windows and batch
     # CHECKPOINT: Dataloading and windowing is working correctly #
     win_ds = ds.flat_map(lambda ep: episode_to_windows_with_prefix(ep, window_size))
     train_ds = (
         win_ds
-        .shuffle(2048)                   # mix windows from different episodes
+        # .shuffle(2048)                   # mix windows from different episodes
         .batch(batch_size, drop_remainder=False)
         .prefetch(tf.data.AUTOTUNE)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
     )
