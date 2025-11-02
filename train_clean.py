@@ -24,7 +24,7 @@ from data.libero_rlds import LiberoRlds, LiberoRldsConfig, episode_to_windows_wi
 from models.bc_simple import generate_attention_mask, BCSimple, GPTConfig
 from eval_libero_clean import eval_libero10
 
-def make_dataset(root_dir: str, info_path: str, img_primary: int, img_wrist: int):
+def make_dataset(root_dir: str, info_path: str, img_primary: int, img_wrist: int, gripper_width: bool = False):
     builder = LiberoRlds(
         config=LiberoRldsConfig(
             name="local_libero_runtime",
@@ -33,6 +33,7 @@ def make_dataset(root_dir: str, info_path: str, img_primary: int, img_wrist: int
             info_path=info_path,
             image_primary_size=img_primary,
             image_wrist_size=img_wrist,
+            gripper_width=gripper_width,
         )
     )
     # builds TFRecords into ~/tensorflow_datasets/libero_rlds/...
@@ -89,7 +90,7 @@ def process_language(batch, clip_tokenize=clip.tokenize):
 
     return tokens_bt, uniq_strs
 
-def process_batch(batch):
+def process_batch(batch, gripper_width: bool = False):
     """
     batch: dict coming from your tf.data pipeline (already windowed + batched)
            shapes (~): 
@@ -111,14 +112,19 @@ def process_batch(batch):
 
     # 2) states: concat first 6 dims with last dim (gripper)
     # torch: torch.cat([states_orig[..., :6], states_orig[..., [-1]]], dim=-1)
-    states0 = jnp.concatenate(
-        [states_orig[..., :6], states_orig[..., -1:]], axis=-1
-    )  # shape (..., 7)  ← jnp.concatenate is the JAX/NumPy op :contentReference[oaicite:1]{index=1}
+    if not gripper_width:
+        states0 = jnp.concatenate(
+            [states_orig[..., :6], states_orig[..., -1:]], axis=-1
+        )  # shape (..., 7)  ← jnp.concatenate is the JAX/NumPy op :contentReference[oaicite:1]{index=1}
 
-    # 3) binarize the gripper part: (x + 1) // 2
-    # torch would do an in-place write; in JAX we rebuild it
-    grip = (states0[..., 6:] + 1.0) // 2.0
-    states0 = states0.at[..., 6:].set(grip)   # pure, JAXy update :contentReference[oaicite:2]{index=2}
+        # 3) binarize the gripper part: (x + 1) // 2
+        # torch would do an in-place write; in JAX we rebuild it
+        grip = (states0[..., 6:] + 1.0) // 2.0
+        states0 = states0.at[..., 6:].set(grip)   # pure, JAXy update :contentReference[oaicite:2]{index=2}
+    else:
+        states0 = jnp.concatenate(
+            [states_orig[..., :6], states_orig[..., -2:]], axis=-1
+        ) # (..., 8)
 
     # 4) stack cameras
     # torch: torch.cat([rgb_static.unsqueeze(1), wrist_rgb.unsqueeze(1)], dim=1)
@@ -145,6 +151,7 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
                     # Input Data #
                     images, states, actions, language, attention_mask, batch_targets
                 ):
+        # print("Train step print for JIT check: {}".format(rng)) # If JIT is enabled, this should not be printed as JIT should ignore this line
         # Split Key #
         rng, dropout_rng = jax.random.split(rng)
 
@@ -152,15 +159,16 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
             variables = {"params": params, "batch_stats": batch_stats}
             (action_pred_arm, action_pred_gripper), mutable = model_apply(
                 variables,
-                images, states, actions, language, attention_mask,
+                images, states, language, attention_mask,
                 train=True,
                 mutable=['batch_stats'],
                 rngs={'dropout': dropout_rng},
             )
             loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
-            # loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
+            loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
-            loss = loss_arm + 0.1 * loss_grip
+            loss = loss_arm + 0.5 * loss_grip
+            # loss = loss_arm
             return loss, (mutable['batch_stats'], loss_arm, loss_grip)
 
         (loss, (new_batch_stats, loss_arm, loss_grip)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
@@ -197,28 +205,35 @@ def main():
     image_primary_size = 224
     image_wrist_size = 224
     window_size = 13 # Actual history length is window_size - action_pred_steps
-    batch_size = 8
+    batch_size = 16
     NUM_IMAGES = 2 # Wrist + Static Camera
     action_pred_steps = 3
     history_length = window_size - action_pred_steps
     action_dim = 7
     state_dim = 7
+    gripper_width = True
+    if gripper_width:
+        state_dim = 8
+    train_ds_len = 20000 # max(1, 20 // batch_size)
     # Model #
     hidden_dim = 768
     num_layers = 24
     num_heads = 12
+    dropout_rate = 0.1
     # Training #
     num_epochs = 20
-    learning_rate = 1e-4
+    learning_rate = 2e-5
+    use_lr_schedule = True
     # Toggles #
     USE_WANDB = True
+    EVAL_AFTER_EPOCH = False
     
 
     if USE_WANDB:
         # Wandb init #
         run = wandb.init(
             project="vlaft",
-            name="bc_run_clean",
+            name="bc_run_overfit_debug",
             config={
                 "lr": learning_rate,
                 "batch_size": batch_size,
@@ -229,20 +244,29 @@ def main():
         )
 
     # DATASET CREATION #
-    ds = make_dataset(root_dir, info_path, image_primary_size, image_wrist_size) # Dataset of episodes
+    ds = make_dataset(root_dir, info_path, image_primary_size, image_wrist_size, gripper_width=gripper_width) # Dataset of episodes
 
     # Create windows and batch
+    # CHECKPOINT: Dataloading and windowing is working correctly #
     win_ds = ds.flat_map(lambda ep: episode_to_windows_with_prefix(ep, window_size))
     train_ds = (
         win_ds
-        .shuffle(2048)                   # mix windows from different episodes
+        # .shuffle(2048)                   # mix windows from different episodes
         .batch(batch_size, drop_remainder=False)
         .prefetch(tf.data.AUTOTUNE)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
     )
+    # ONLY FOR DEBUGGING PURPOSES #
+    train_ds = train_ds.take(20)
+    debug_batch = next(iter(train_ds))
+    images0, states0, actions0, language0 = process_batch(debug_batch)
+    # CHECKPOINT: Breakpoint above to check if batching and dataloading is working correctly #
 
     # Generate attention mask #
+    # CHECKPOINT: Attention mask generation is working correctly #
     attention_mask = generate_attention_mask(history_length, NUM_IMAGES + 1 + 1, action_pred_steps) # 2 images + 1 language + 1 state
     attention_mask = jnp.array(attention_mask, dtype=bool) # Fixed static attention mask
+    # breakpoint()
+    # CHECKPOINT: Breakpoint above to check if attention mask generation is working correctly #
     ###########################################################
 
     # MODEL CREATION #
@@ -252,7 +276,8 @@ def main():
         num_heads=num_heads,
         num_embeds=hidden_dim,
         use_bias=True,
-        dtype=None,
+        dtype=jnp.float32,
+        dropout_rate=dropout_rate, # DEBUGGING ONLY: DISABLE DROPOUT FOR NOW #
     )
 
     model_def = BCSimple(
@@ -262,7 +287,7 @@ def main():
         transformer_layers=num_layers,
         hidden_dim=hidden_dim,
         transformer_heads=num_heads,
-        gripper_width=False,
+        gripper_width=gripper_width,
         num_images=NUM_IMAGES,
         action_dim=action_dim,
         state_dim=state_dim,
@@ -276,7 +301,7 @@ def main():
     # Get some initial data to pass to the model
     print("Initializing model...")
     init_batch = next(iter(train_ds.take(1)))
-    images0, states0, actions0, language0 = process_batch(init_batch)
+    images0, states0, actions0, language0 = process_batch(init_batch, gripper_width=gripper_width)
     del init_batch  # Clear TF batch from memory
     
     # Condition only to history length
@@ -286,7 +311,7 @@ def main():
     # Pass along to init model
     variables = model_def.init(
         {'params': params_key, 'dropout': dropout_key},
-        images0, states0, actions0, language0,
+        images0, states0, language0,
         attention_mask,
         train=False
     )
@@ -300,7 +325,20 @@ def main():
     print(f"\n\n\n\n\nParameter count: {param_count / 1e6} M\n\n\n\n\n")
 
     # Use schedule in Adam optimizer
-    tx = optax.adam(learning_rate)
+    if use_lr_schedule:
+        total_steps = num_epochs * train_ds_len
+        warmup_steps = max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
+        decay_steps  = max(1, total_steps - warmup_steps)
+        lr_schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,                 # start at 0
+            peak_value=float(learning_rate),
+            warmup_steps=warmup_steps,
+            decay_steps=decay_steps,
+            end_value=0.0                   # decay to 0
+        )
+        tx = optax.adam(lr_schedule)
+    else:
+        tx = optax.adam(learning_rate)
     opt_state = tx.init(params)
 
     # Create train step function #
@@ -330,7 +368,7 @@ def main():
             rng = jax.random.fold_in(rng, i)
 
             # Process a batch for training
-            images0, states0, actions0, language0 = process_batch(tf_batch)
+            images0, states0, actions0, language0 = process_batch(tf_batch, gripper_width=gripper_width)
             # Condition only to history length
             images0 = images0[:, :, :history_length, ...]
             states0 = states0[:, :history_length, ...]
@@ -353,13 +391,16 @@ def main():
             train_steps += 1
             if jax.process_index() == 0:
                 if USE_WANDB:
+                    lr_log = learning_rate
+                    if use_lr_schedule:
+                        lr_log = float(jax.device_get(lr_schedule(int(train_steps))))
                     wandb.log({
                         'training/loss_arm': float(info_dict['loss_arm']),
                         'training/loss_grip': float(info_dict['loss_grip']),
                         'training/loss': float(info_dict['loss']),
                         'training/grad_norm': float(info_dict['grad_norm']),
                         'training/update_norm': float(info_dict['update_norm']),
-                        'training/lr': learning_rate,
+                        'training/lr': lr_log,
                         'training/param_norm': float(info_dict['param_norm']),
                         'training/epoch': epoch,
                         'training/train_steps': train_steps,
@@ -368,18 +409,22 @@ def main():
                     print(f"Loss Arm: {info_dict['loss_arm']}, Loss Grip: {info_dict['loss_grip']}, Loss: {info_dict['loss']}, Grad Norm: {info_dict['grad_norm']}, Update Norm: {info_dict['update_norm']}, Param Norm: {info_dict['param_norm']}")
 
         # Eval #
-        model_dict = {
-            "model_def": model_def,
-            "params": params,
-            "batch_stats": batch_stats,
-        }
-        libero_dir = "/home/skowshik/vla/codebase/envs/LIBERO"
-        task_name = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
-        libero_cfg = {
-            "libero_img_size": image_primary_size,
-            "libero_eval_max_steps": 400,
-        }
-        eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=20, libero_cfg=libero_cfg)
+        if EVAL_AFTER_EPOCH:
+            model_dict = {
+                "model_def": model_def,
+                "params": params,
+                "batch_stats": batch_stats,
+            }
+            libero_dir = "/home/skowshik/vla/codebase/envs/LIBERO"
+            task_name = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+            libero_cfg = {
+                "libero_img_size": image_primary_size,
+                "libero_eval_max_steps": 400,
+            }
+            eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=20, libero_cfg=libero_cfg)
+        
+        if USE_WANDB:
+            run.finish()
 
 if __name__ == "__main__":
     main()

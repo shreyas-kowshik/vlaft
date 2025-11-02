@@ -46,9 +46,9 @@ class TimestepEmbedder(nn.Module):
     @nn.compact
     def __call__(self, t):
         x = self.timestep_embedding(t)
-        x = nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02))(x)
+        x = nn.Dense(self.hidden_size)(x)
         x = nn.silu(x)
-        x = nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02))(x)
+        x = nn.Dense(self.hidden_size)(x)
         return x
 
     # t is between [0, max_period]. It's the INTEGER timestep, not the fractional (0,1).;
@@ -91,36 +91,36 @@ class BCSimple(nn.Module):
 
     def setup(self):
         self.image_encoder = fm.ResNet18(output='activations', pretrained='imagenet', normalize=True)
-        self.image_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
-        self.state_encoder = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
+        self.image_projector = nn.Dense(self.hidden_dim)
+        self.state_encoder = nn.Dense(self.hidden_dim)
         self.clip = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.text_projector = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02))
+        self.text_projector = nn.Dense(self.hidden_dim)
         self.timestep_embedding = TimestepEmbedder(self.hidden_dim)
         self.action_embedding = self.param(
             "action_embedding",
-            normal(stddev=0.02),      # init_fn(key, shape, dtype) -> array
+            nn.initializers.zeros,
             (3, self.hidden_dim)
         )
+        self.action_timestep_embedding = TimestepEmbedder(self.hidden_dim) # To let the model distinguish between different action predictions within a chunk
         self.action_projector_arm = nn.Sequential([
-            nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02)),
+            nn.Dense(self.hidden_dim),
             nn.relu,
-            nn.Dense(self.action_dim - 1, kernel_init=nn.initializers.normal(0.02)),
+            nn.Dense(self.action_dim - 1),
             nn.tanh,
         ])
         self.action_projector_gripper = nn.Sequential([
-            nn.Dense(self.hidden_dim, kernel_init=nn.initializers.normal(0.02)), 
+            nn.Dense(self.hidden_dim), 
             nn.relu,
-            nn.Dense(1, kernel_init=nn.initializers.normal(0.02)), 
+            nn.Dense(1), 
             # nn.sigmoid
         ])
         self.transformer = GPT(self.config)
         
     @nn.compact
-    def __call__(self, images, states, actions, text_tokens, attention_mask, train=False):
+    def __call__(self, images, states, text_tokens, attention_mask, train=False):
         # (x = (B, H, W, C) image, t = (B,) timesteps, y = (B,) class labels)
         # images = (B, num_images, T, H, W, C)
         # states = (B, T, state_dim)
-        # actions = (B, T, action_dim)
         # Encoder vision features #
         B, num_images, T, H, W, C = images.shape
         images = images.reshape(-1, H, W, C) # (B*T*num_images, H, W, C)
@@ -146,6 +146,8 @@ class BCSimple(nn.Module):
         text_emb = text_emb + timestep_embedding
 
         action_emb = self.action_embedding.reshape(1, 1, 3, -1)
+        action_timestep_embedding = self.action_timestep_embedding(jnp.arange(self.action_pred_steps)) # (action_pred_steps, hidden_dim)
+        action_emb = action_emb + action_timestep_embedding.reshape(1, 1, self.action_pred_steps, -1)
         action_emb = action_emb + timestep_embedding.reshape(1, T, 1, -1)
 
         # Concatenate all embeddings and pass through transformer
