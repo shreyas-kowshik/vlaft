@@ -23,6 +23,8 @@ import wandb
 import tqdm
 import functools
 from flax.training import checkpoints
+from flax import traverse_util
+from flax.core import freeze
 
 from data.libero_rlds import LiberoRlds, LiberoRldsConfig, episode_to_windows_with_prefix
 from models.bc_simple import generate_attention_mask, BCSimple, GPTConfig
@@ -172,11 +174,32 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
             loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
             # loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
-            loss = loss_arm + 0.5 * loss_grip
-            return loss, (mutable['batch_stats'], loss_arm, loss_grip)
+            loss = loss_arm + 0.05 * loss_grip
 
-        (loss, (new_batch_stats, loss_arm, loss_grip)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+            # Get per dimension L1 loss for arm and gripper and return in info_dict #
+            l1_loss_arm0 = jnp.abs(action_pred_arm[:, :, :, 0] - batch_targets[:, :, :, 0]).mean()
+            l1_loss_arm1 = jnp.abs(action_pred_arm[:, :, :, 1] - batch_targets[:, :, :, 1]).mean()
+            l1_loss_arm2 = jnp.abs(action_pred_arm[:, :, :, 2] - batch_targets[:, :, :, 2]).mean()
+            l1_loss_arm3 = jnp.abs(action_pred_arm[:, :, :, 3] - batch_targets[:, :, :, 3]).mean()
+            l1_loss_arm4 = jnp.abs(action_pred_arm[:, :, :, 4] - batch_targets[:, :, :, 4]).mean()
+            l1_loss_arm5 = jnp.abs(action_pred_arm[:, :, :, 5] - batch_targets[:, :, :, 5]).mean()
+            l1_loss_grip = jnp.abs(jax.nn.sigmoid(action_pred_gripper[:, :, :, 6]) - batch_targets[:, :, :, 6]).mean()
+            
+            return loss, (mutable['batch_stats'], 
+                            loss_arm, loss_grip, l1_loss_arm0, l1_loss_arm1, l1_loss_arm2, l1_loss_arm3, l1_loss_arm4, l1_loss_arm5, l1_loss_grip)
+
+        (loss, vals), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+        new_batch_stats = vals[0]
         batch_stats = new_batch_stats
+        loss_arm = vals[1]
+        loss_grip = vals[2]
+        l1_loss_arm0 = vals[3]
+        l1_loss_arm1 = vals[4]
+        l1_loss_arm2 = vals[5]
+        l1_loss_arm3 = vals[6]
+        l1_loss_arm4 = vals[7]
+        l1_loss_arm5 = vals[8]
+        l1_loss_grip = vals[9]
         
         # Update parameters and state #
         updates, opt_state = tx.update(grads, opt_state, params)
@@ -186,19 +209,45 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
         grad_norm   = optax.global_norm(grads)
         update_norm = optax.global_norm(updates)
         param_norm  = optax.global_norm(params)
+        vision_param_norm = optax.global_norm(params['image_encoder'])
 
         info_dict = {
             'loss_arm': loss_arm,
             'loss_grip': loss_grip,
             'loss': loss,
+            'l1_loss_arm0': l1_loss_arm0,
+            'l1_loss_arm1': l1_loss_arm1,
+            'l1_loss_arm2': l1_loss_arm2,
+            'l1_loss_arm3': l1_loss_arm3,
+            'l1_loss_arm4': l1_loss_arm4,
+            'l1_loss_arm5': l1_loss_arm5,
+            'l1_loss_grip': l1_loss_grip,
             'grad_norm': grad_norm,
             'update_norm': update_norm,
             'param_norm': param_norm,
+            'vision_param_norm': vision_param_norm,
         }
         
         return params, batch_stats, opt_state, rng, info_dict # RNG is also part of state!
     
     return train_step
+
+def make_tx(params):
+    def label(path, _):
+        root = path[0]
+        if root in ("clip", "resnet"):
+            return "frozen"
+        return "trainable"
+
+    param_labels = freeze(traverse_util.path_aware_map(label, params))
+    tx = optax.multi_transform(
+        {
+            "trainable": optax.adam(1e-4),
+            "frozen": optax.set_to_zero(),
+        },
+        param_labels,
+    )
+    return tx
 
 def main():
     # CONSTANTS #
@@ -222,15 +271,15 @@ def main():
     gripper_width = True
     if gripper_width:
         state_dim = 8
-    train_ds_len = 1200 # max(1, 20 // batch_size)
+    train_ds_len = 30 # max(1, 20 // batch_size)
     # Model #
     hidden_dim = 768
     num_layers = 24
     num_heads = 12
     dropout_rate = 0.0
     # Training #
-    num_epochs = 30
-    learning_rate = 1e-5
+    num_epochs = 300
+    learning_rate = 1e-6
     use_lr_schedule = True
     num_eval_episodes = 20
     # Toggles #
@@ -331,6 +380,7 @@ def main():
     )
     params = variables['params']
     batch_stats = variables.get('batch_stats', None)
+    # breakpoint()
     
     # Clear init data from GPU memory
     del images0, states0, actions0, language0, step_ids0
@@ -341,19 +391,22 @@ def main():
     # Use schedule in Adam optimizer
     if use_lr_schedule:
         total_steps = num_epochs * train_ds_len
-        warmup_steps = 1000 # max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
+        warmup_steps = 30 # max(1, int(0.01 * total_steps))  # 1% warmup (adjust to match Seer config)
         decay_steps  = max(1, total_steps - warmup_steps)
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,                 # start at 0
             peak_value=float(learning_rate),
             warmup_steps=warmup_steps,
             decay_steps=decay_steps,
-            end_value=1e-8
+            end_value=1e-7
         )
+        params['image_encoder'] = freeze(params['image_encoder'])
         tx = optax.adam(lr_schedule)
+        # tx = make_tx(params)
     else:
         tx = optax.adam(learning_rate)
     opt_state = tx.init(params)
+    # breakpoint()
 
     # Create train step function #
     print("Compiling train_step (this may take a moment and use memory)...")
@@ -413,8 +466,16 @@ def main():
                         'training/loss_arm': float(info_dict['loss_arm']),
                         'training/loss_grip': float(info_dict['loss_grip']),
                         'training/loss': float(info_dict['loss']),
+                        'training/l1_loss_arm0': float(info_dict['l1_loss_arm0']),
+                        'training/l1_loss_arm1': float(info_dict['l1_loss_arm1']),
+                        'training/l1_loss_arm2': float(info_dict['l1_loss_arm2']),
+                        'training/l1_loss_arm3': float(info_dict['l1_loss_arm3']),
+                        'training/l1_loss_arm4': float(info_dict['l1_loss_arm4']),
+                        'training/l1_loss_arm5': float(info_dict['l1_loss_arm5']),
+                        'training/l1_loss_grip': float(info_dict['l1_loss_grip']),
                         'training/grad_norm': float(info_dict['grad_norm']),
                         'training/update_norm': float(info_dict['update_norm']),
+                        'training/vision_param_norm': float(info_dict['vision_param_norm']),
                         'training/lr': lr_log,
                         'training/param_norm': float(info_dict['param_norm']),
                         'training/epoch': epoch,
@@ -451,7 +512,7 @@ def main():
                     'evaluation/success_rate': success_rate,
                 }, step=train_steps)
                 # Log best rollout rgb .gif to wandb
-                save_rgbs_to_gif(rollout_rbgs[0], "best_rollout_rgb.gif")
+                save_rgbs_to_gif(rollout_rbgs[-1], "best_rollout_rgb.gif")
                 wandb.log({
                     "rollout": wandb.Video("best_rollout_rgb.gif", format="gif", fps=11)  # fps is ignored for file paths but OK
                 }, step=train_steps)

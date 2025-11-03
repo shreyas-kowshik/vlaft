@@ -225,9 +225,15 @@ def evaluate_libero_task(task, env, obs, model, libero_cfg={}):
         action, info_dict = model.step(obs, goal_tokens)
 
         # Debug #
-        gt_action = libero_cfg["demo_data"]["actions"][()][steps]
-        breakpoint()
-        action = gt_action
+        use_gt_action = libero_cfg.get("use_gt_action", False)
+        if use_gt_action:
+            if steps >= len(libero_cfg["demo_data"]["actions"][()]):
+                success = 1
+                done = True
+                break
+            
+            gt_action = libero_cfg["demo_data"]["actions"][()][steps]
+            action = gt_action
         
         steps += 1
         rgbs.append(info_dict["rgb"])
@@ -257,7 +263,6 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
 
     # Create a model wrapper for evaluation #
     model = JAXModelWrapper(model_dict, libero_cfg=libero_cfg)
-    breakpoint()
     
     results = []
     rollout_rbgs = []
@@ -309,7 +314,6 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
 
         for _ in range(5):
             env.step(np.zeros(7, dtype=np.float32))
-        breakpoint()
 
         result, rgbs = evaluate_libero_task(task, env, obs, model, libero_cfg=libero_cfg)
         results.append(result)

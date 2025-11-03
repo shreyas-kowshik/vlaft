@@ -73,7 +73,6 @@ def main():
         state_dim=state_dim,
         config=gpt_conf,
     )
-    # breakpoint()
 
     # Load model from checkpoint #
     ckpt = checkpoints.restore_checkpoint(ckpt_dir=CKPT_DIR, target=None)
@@ -84,7 +83,6 @@ def main():
     import gc
     gc.collect()
     print("Loaded model from checkpoint")
-    breakpoint()
 
     # Eval #
     model_dict = {
@@ -100,6 +98,7 @@ def main():
         "gripper_width": gripper_width,
         "history_len": history_length,
         "action_pred_steps": action_pred_steps,
+        "use_gt_action": False,
     }
     results, rollout_rbgs = eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=1, libero_cfg=libero_cfg)
     save_rgbs_to_gif(rollout_rbgs[0], "model_traj_rgb.gif")
