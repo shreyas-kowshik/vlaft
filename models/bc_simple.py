@@ -92,10 +92,22 @@ class BCSimple(nn.Module):
 
     def setup(self):
         self.image_encoder = fm.ResNet18(output='activations', pretrained='imagenet', normalize=True)
-        self.image_projector = nn.Dense(self.hidden_dim)
-        self.state_encoder = nn.Dense(self.hidden_dim)
+        self.image_projector = nn.Sequential([
+            nn.Dense(self.hidden_dim),
+            nn.relu,
+            nn.Dense(self.hidden_dim),
+        ])
+        self.state_encoder = nn.Sequential([
+            nn.Dense(self.hidden_dim),
+            nn.relu,
+            nn.Dense(self.hidden_dim),
+        ])
         self.clip = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.text_projector = nn.Dense(self.hidden_dim)
+        self.text_projector = nn.Sequential([
+            nn.Dense(self.hidden_dim),
+            nn.relu,
+            nn.Dense(self.hidden_dim),
+        ])
         self.timestep_embedding = TimestepEmbedder(self.hidden_dim)
         self.action_embedding = self.param(
             "action_embedding",
@@ -104,7 +116,11 @@ class BCSimple(nn.Module):
         )
         self.action_timestep_embedding = TimestepEmbedder(self.hidden_dim) # To let the model distinguish between different action predictions within a chunk
         self.step_id_embedding = nn.Embed(self.max_step_id, self.hidden_dim)
-        self.step_id_projector = nn.Dense(self.hidden_dim)
+        self.step_id_projector = nn.Sequential([
+            nn.Dense(self.hidden_dim),
+            nn.relu,
+            nn.Dense(self.hidden_dim),
+        ])
         self.action_projector_arm = nn.Sequential([
             nn.Dense(self.hidden_dim),
             nn.relu,

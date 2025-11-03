@@ -51,7 +51,7 @@ class JAXModelWrapper:
     def __init__(self, model_dict, libero_cfg={}):
         self.model_dict = model_dict
         self.model_def = model_dict["model_def"]
-        self.history_len = libero_cfg.get("history_len", 10)
+        self.history_len = libero_cfg.get("history_len", 5)
         self.action_pred_steps = libero_cfg.get("action_pred_steps", 3)  # CRITICAL: Required for attention mask
         self.libero_cfg = libero_cfg
 
