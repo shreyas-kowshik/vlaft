@@ -174,7 +174,7 @@ def make_train_step(model_apply, tx): # Need this wrapper as jax.jit expects thi
             loss_arm = optax.huber_loss(action_pred_arm, batch_targets[:, :, :, :-1]).mean()
             # loss_grip = optax.huber_loss(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
             loss_grip = optax.sigmoid_binary_cross_entropy(action_pred_gripper, batch_targets[:, :, :, -1:]).mean()
-            loss = loss_arm + 0.05 * loss_grip
+            loss = loss_arm + 0.2 * loss_grip
 
             # Get per dimension L1 loss for arm and gripper and return in info_dict #
             l1_loss_arm0 = jnp.abs(action_pred_arm[:, :, :, 0] - batch_targets[:, :, :, 0]).mean()
@@ -259,10 +259,10 @@ def main():
     if os.path.exists(CKPT_DIR):
         shutil.rmtree(CKPT_DIR)
     os.makedirs(CKPT_DIR)
-    image_primary_size = 224
-    image_wrist_size = 224
-    window_size = 13 # Actual history length is window_size - action_pred_steps
-    batch_size = 16
+    image_primary_size = 100
+    image_wrist_size = 100
+    window_size = 8 # Actual history length is window_size - action_pred_steps
+    batch_size = 128
     NUM_IMAGES = 2 # Wrist + Static Camera
     action_pred_steps = 3
     history_length = window_size - action_pred_steps
@@ -271,17 +271,17 @@ def main():
     gripper_width = True
     if gripper_width:
         state_dim = 8
-    train_ds_len = 30 # max(1, 20 // batch_size)
+    train_ds_len = 100 # max(1, 20 // batch_size)
     # Model #
-    hidden_dim = 768
-    num_layers = 24
-    num_heads = 12
-    dropout_rate = 0.0
+    hidden_dim = 512
+    num_layers = 8
+    num_heads = 8
+    dropout_rate = 0.2
     # Training #
     num_epochs = 300
-    learning_rate = 1e-6
+    learning_rate = 1e-3
     use_lr_schedule = True
-    num_eval_episodes = 20
+    num_eval_episodes = 10
     # Toggles #
     USE_WANDB = True
     EVAL_AFTER_EPOCH = True
@@ -305,7 +305,7 @@ def main():
     # DATASET CREATION #
     ds = make_dataset(root_dir, info_path, image_primary_size, image_wrist_size, gripper_width=gripper_width) # Dataset of episodes
     # Keep only first episode for DEBUGGING #
-    ds = ds.take(1)
+    # ds = ds.take(1)
 
     # Create windows and batch
     # CHECKPOINT: Dataloading and windowing is working correctly #
@@ -332,7 +332,7 @@ def main():
 
     # MODEL CREATION #
     gpt_conf = GPTConfig(
-        block_size=(history_length + action_pred_steps) * (NUM_IMAGES + 1 + 1 + 3),
+        block_size=(history_length + action_pred_steps) * (NUM_IMAGES + 1 + 1 + action_pred_steps),
         num_layers=num_layers,
         num_heads=num_heads,
         num_embeds=hidden_dim,
@@ -398,7 +398,7 @@ def main():
             peak_value=float(learning_rate),
             warmup_steps=warmup_steps,
             decay_steps=decay_steps,
-            end_value=1e-7
+            end_value=1e-5
         )
         params['image_encoder'] = freeze(params['image_encoder'])
         tx = optax.adam(lr_schedule)
@@ -497,6 +497,8 @@ def main():
                 "libero_img_size": image_primary_size,
                 "libero_eval_max_steps": 400,
                 "gripper_width": gripper_width,
+                "history_length": history_length,
+                "action_pred_steps": action_pred_steps,
             }
             results, rollout_rbgs = eval_libero10(model_dict, libero_dir, task_name=task_name, num_eval_episodes=num_eval_episodes, libero_cfg=libero_cfg)
             # Sort results and rollouts by values of results
