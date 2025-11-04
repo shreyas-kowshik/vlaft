@@ -109,7 +109,7 @@ class LiberoRldsConfig(tfds.core.BuilderConfig):
         gripper_width: bool = False,
         **kwargs,
     ):
-        super().__init__(version=tfds.core.Version("0.1.4"), **kwargs)
+        super().__init__(version=tfds.core.Version("0.1.5"), **kwargs)
         self.root_dir = root_dir
         self.info_path = info_path
         self.image_primary_size = image_primary_size

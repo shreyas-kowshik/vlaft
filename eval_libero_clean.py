@@ -51,7 +51,7 @@ class JAXModelWrapper:
     def __init__(self, model_dict, libero_cfg={}):
         self.model_dict = model_dict
         self.model_def = model_dict["model_def"]
-        self.history_len = libero_cfg.get("history_len", 5)
+        self.history_len = libero_cfg.get("history_len", 8)
         self.action_pred_steps = libero_cfg.get("action_pred_steps", 3)  # CRITICAL: Required for attention mask
         self.libero_cfg = libero_cfg
 
@@ -244,7 +244,7 @@ def evaluate_libero_task(task, env, obs, model, libero_cfg={}):
     env.close()
     return success, rgbs
 
-def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20, task_num=10, libero_cfg={}):
+def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20, task_num=10, libero_cfg={}, retrun_task_suite=False):
     """
     Evaluate the model on the Libero 10 task.
     Args:
@@ -287,22 +287,23 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
         }
         env = OffScreenRenderEnv(**env_args)
 
-        # # set initial state
-        # init_states_path = os.path.join(
-        #     f"{libero_path}/libero/libero/init_files", task.problem_folder, task.init_states_file
-        # )
-        # import torch  # only for loading the init_state .pt
-        # init_states = torch.load(init_states_path, weights_only=False) # Version mismatch change to include `weights_only=False`
-        # init_state = init_states[exp_id]
+        # set initial state
+        init_states_path = os.path.join(
+            f"{libero_path}/libero/libero/init_files", task.problem_folder, task.init_states_file
+        )
+        import torch  # only for loading the init_state .pt
+        init_states = torch.load(init_states_path, weights_only=False) # Version mismatch change to include `weights_only=False`
+        init_state = init_states[exp_id]
 
         # Load initial state from demo data #
-        BASE_PATH = "/data/user_data/skowshik/datasets/libero_pro/libero_10"
-        TASK_NAME = "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
-        task_id = 9
-        DEMO_ID = 0
-        traj_file = h5py.File(os.path.join(BASE_PATH, TASK_NAME + "_demo.hdf5"), "r")
-        demo_data = traj_file['data']['demo_{}'.format(DEMO_ID)]
-        init_state = demo_data['states'][()][0]
+        # BASE_PATH = "/data/user_data/skowshik/datasets/libero_pro/libero_10"
+        # TASK_NAME = "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+        # task_id = 9
+        # DEMO_ID = 0
+        # traj_file = h5py.File(os.path.join(BASE_PATH, TASK_NAME + "_demo.hdf5"), "r")
+        # demo_data = traj_file['data']['demo_{}'.format(DEMO_ID)]
+        # init_state = demo_data['states'][()][0]
+        # libero_cfg["demo_data"] = demo_data
 
         env.task_id = task_id
         env.task_name = task_name
@@ -310,7 +311,6 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
         env.reset()
         env.seed(0)
         obs = env.set_init_state(init_state)
-        libero_cfg["demo_data"] = demo_data
 
         for _ in range(5):
             env.step(np.zeros(7, dtype=np.float32))
@@ -320,21 +320,23 @@ def eval_libero10(model_dict, libero_path, task_name=None, num_eval_episodes=20,
         rollout_rbgs.append(rgbs)
         print("results so far:", results)
         
-        # Cleanup environment and file handle
+    # Cleanup environment and file handle
+    try:
         del env
         traj_file.close()
-        import gc
-        gc.collect()
-
-        # Make 'gifs' directory
-        # os.makedirs("gifs", exist_ok=True)
-        # save_rgbs_to_gif(rgbs, f"gifs/rgbs_{task_name}_{eval_id}.gif")
+    except:
+        pass
+    import gc
+    gc.collect()
 
     # print aggregate
     # if TASK_NAME is None:
     #     print_and_save([(r, i) for i, r in enumerate(results)], task_suite)
 
-    return results, rollout_rbgs
+    if retrun_task_suite:
+        return results, rollout_rbgs, task_suite
+    else:
+        return results, rollout_rbgs
 
 # if __name__ == "__main__":
 #     main()

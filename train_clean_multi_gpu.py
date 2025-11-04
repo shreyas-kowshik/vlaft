@@ -2,6 +2,7 @@
 from re import L
 import tensorflow as tf
 import os
+os.environ["TFDS_DATA_DIR"] = "/data/user_data/skowshik/tensorflow_datasets"
 import shutil
 # CRITICAL: Disable GPU for TensorFlow to prevent GPU memory allocation during dataset creation
 # TensorFlow will allocate GPU memory by default if it detects a GPU, even for dataset operations
@@ -262,15 +263,17 @@ def main():
     # CONSTANTS #
     seed = 0
     # Dataloader #
-    root_dir = "/data/user_data/skowshik/datasets/libero_pro/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/"
-    info_path = "./data_info/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.json"
-    CKPT_DIR = "/data/user_data/skowshik/checkpoints/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/one_demo_ckpt_dir"
+    # root_dir = "/data/user_data/skowshik/datasets/libero_pro/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it/"
+    # info_path = "./data_info/libero_10_converted_kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.json"
+    root_dir = "/data/user_data/skowshik/datasets/libero_pro/libero_10_converted"
+    info_path = "./data_info/libero_10_converted.json"
+    CKPT_DIR = "/data/user_data/skowshik/checkpoints/libero_10/libero10_v1"
     if os.path.exists(CKPT_DIR):
         shutil.rmtree(CKPT_DIR)
     os.makedirs(CKPT_DIR)
     image_primary_size = 100
     image_wrist_size = 100
-    window_size = 8 # Actual history length is window_size - action_pred_steps
+    window_size = 11 # Actual history length is window_size - action_pred_steps
     batch_size = 128 * int(jax.device_count()) # Batch size per device
     NUM_IMAGES = 2 # Wrist + Static Camera
     action_pred_steps = 3
@@ -280,17 +283,17 @@ def main():
     gripper_width = True
     if gripper_width:
         state_dim = 8
-    train_ds_len = 100 * int(jax.device_count()) # max(1, 20 // batch_size)
+    train_ds_len = 1000 * int(jax.device_count()) # max(1, 20 // batch_size)
     # Model #
     hidden_dim = 512
-    num_layers = 8
+    num_layers = 12
     num_heads = 8
     dropout_rate = 0.2
     # Training #
-    num_epochs = 200
+    num_epochs = 20
     learning_rate = 1e-3
     use_lr_schedule = True
-    num_eval_episodes = 10
+    num_eval_episodes = 2
     # Toggles #
     USE_WANDB = True
     EVAL_AFTER_EPOCH = True
@@ -324,12 +327,12 @@ def main():
     win_ds = ds.flat_map(lambda ep: episode_to_windows_with_prefix(ep, window_size))
     train_ds = (
         win_ds
-        # .shuffle(2048)                   # mix windows from different episodes
+        .shuffle(2048)                   # mix windows from different episodes
         .batch(batch_size, drop_remainder=False)
         .prefetch(tf.data.AUTOTUNE)  # Reduced prefetch to limit memory usage (was AUTOTUNE which could be very large)
     )
     if DEBUG_DATA_SUBSET:
-        train_ds = train_ds.take(20)
+        train_ds = train_ds.take(5)
     debug_batch = next(iter(train_ds))
     images0, states0, actions0, language0, step_ids0 = process_batch(debug_batch)
     # CHECKPOINT: Breakpoint above to check if batching and dataloading is working correctly #
@@ -413,7 +416,11 @@ def main():
             end_value=1e-5
         )
         # params['image_encoder'] = freeze(params['image_encoder'])
-        tx = optax.adam(lr_schedule)
+        # tx = optax.adam(lr_schedule)
+        tx = optax.chain(
+            optax.clip_by_global_norm(1.0),   # ⟵ clipping
+            optax.adamw(learning_rate=lr_schedule),     # or optax.adam(...)
+        )
         # tx = make_tx(params)
     else:
         tx = optax.adam(learning_rate)
@@ -517,7 +524,8 @@ def main():
                 "batch_stats": batch_stats_host,
             }
             libero_dir = "/home/skowshik/vla/codebase/envs/LIBERO"
-            task_name = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+            # task_name = "kitchen_scene6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+            task_name = None
             libero_cfg = {
                 "libero_img_size": image_primary_size,
                 "libero_eval_max_steps": 400,
@@ -544,27 +552,28 @@ def main():
                     "rollout": wandb.Video("best_rollout_rgb.gif", format="gif", fps=11)  # fps is ignored for file paths but OK
                 }, step=train_steps)
 
-    if jax.process_index() == 0: # Only save checkpoint on main process
-        print("Saving checkpoint to {}...".format(CKPT_DIR))
-        # PMAP Diff #
-        params_host = jax.device_get(flax.jax_utils.unreplicate(params))
-        batch_stats_host = jax.device_get(flax.jax_utils.unreplicate(batch_stats))
-        opt_state_host = jax.device_get(flax.jax_utils.unreplicate(opt_state))
-        rng_host = jax.device_get(flax.jax_utils.unreplicate(new_rng))
-        ckpt_target = {
-            "params": params_host,
-            "batch_stats": batch_stats_host,
-            "opt_state": opt_state_host,
-            "rng": rng_host,
-        }
-        checkpoints.save_checkpoint(
-            ckpt_dir=CKPT_DIR,
-            target=ckpt_target,
-            step=train_steps,        # or epoch + 1, your call
-            overwrite=True,          # replace latest
-            keep=3,                  # keep last 3
-        )
+        if jax.process_index() == 0: # Only save checkpoint on main process
+            print("Saving checkpoint to {}...".format(CKPT_DIR))
+            # PMAP Diff #
+            params_host = jax.device_get(flax.jax_utils.unreplicate(params))
+            batch_stats_host = jax.device_get(flax.jax_utils.unreplicate(batch_stats))
+            opt_state_host = jax.device_get(flax.jax_utils.unreplicate(opt_state))
+            rng_host = jax.device_get(flax.jax_utils.unreplicate(new_rng))
+            ckpt_target = {
+                "params": params_host,
+                "batch_stats": batch_stats_host,
+                "opt_state": opt_state_host,
+                "rng": rng_host,
+            }
+            checkpoints.save_checkpoint(
+                ckpt_dir=CKPT_DIR,
+                target=ckpt_target,
+                step=train_steps,        # or epoch + 1, your call
+                overwrite=True,          # replace latest
+                keep=3,                  # keep last 3
+            )
     
+    if jax.process_index() == 0:
         if USE_WANDB:
             run.finish()
 
